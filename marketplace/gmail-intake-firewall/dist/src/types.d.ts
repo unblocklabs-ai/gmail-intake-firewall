@@ -39,6 +39,7 @@ export type SecurityConfig = {
     maliciousThreshold: number;
     uncertainThreshold: number;
     failClosedOnUncertain: boolean;
+    includeSnippetInAlerts: boolean;
     alertTarget?: string;
     archiveOnQuarantine: boolean;
 };

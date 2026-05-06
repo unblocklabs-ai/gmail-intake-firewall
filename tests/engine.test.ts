@@ -161,6 +161,38 @@ test("prompt injection email is quarantined and not normally woken", async () =>
     "local_log",
     "human_alert",
   ]);
+  const alert = result.decision?.actions.find((action) => action.type === "human_alert");
+  assert.equal(alert?.type, "human_alert");
+  assert.equal(alert.payload && "snippet" in alert.payload, false);
+});
+
+test("suspicious alert payload can include Gmail snippet when explicitly enabled", async () => {
+  const result = await processMessage(baseMessage, config({
+    security: {
+      ...config().security,
+      includeSnippetInAlerts: true,
+    },
+  }), createEmptyState(), {
+    securityClassifier: security({
+      verdict: "risky",
+      riskScore: 0.98,
+      categories: ["prompt_injection"],
+      reasons: ["Attempts to override the agent runtime"],
+      safeSummary: "Message contains prompt injection targeting the agent.",
+      suspiciousSignals: ["ignore previous instructions"],
+    }),
+    routerClassifier: router({
+      tags: ["client-dev"],
+      wakeMode: "wake_now",
+      sanitizedSummary: "Should not run",
+      reasons: [],
+    }),
+  });
+
+  const alert = result.decision?.actions.find((action) => action.type === "human_alert");
+
+  assert.equal(alert?.type, "human_alert");
+  assert.equal(alert.payload?.snippet, baseMessage.snippet);
 });
 
 test("irrelevant safe email records state without wake", async () => {

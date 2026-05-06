@@ -512,6 +512,39 @@ test("runtime drains old history before renewing an expiring watch", async (t) =
   assert.equal(stateStore.getSourceCursor("primary")?.historyId, "200");
 });
 
+test("runtime status reports watch readiness", async (t) => {
+  const stateStore = await tempStore(t);
+  stateStore.setSourceCursor("primary", {
+    mode: "watch",
+    historyId: "100",
+    watchExpiresAt: "2026-05-06T12:30:00.000Z",
+  });
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{
+      id: "primary",
+      accountEmail: "user@example.com",
+      intakeMode: "watch",
+      watchTopicName: "projects/example/topics/gmail",
+    }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => {
+      throw new Error("not used");
+    },
+    now: () => new Date("2026-05-06T12:00:00.000Z"),
+  });
+
+  const status = runtime.status() as { sources?: Array<{ readiness?: Record<string, unknown> }> };
+
+  assert.equal(status.sources?.[0]?.readiness?.mode, "watch");
+  assert.equal(status.sources?.[0]?.readiness?.historyCursorPresent, true);
+  assert.equal(status.sources?.[0]?.readiness?.watchActive, true);
+  assert.equal(status.sources?.[0]?.readiness?.watchNeedsRenewal, true);
+});
+
 test("runtime repairs stale Gmail history with bounded lookback poll", async (t) => {
   const stateStore = await tempStore(t);
   stateStore.setSourceCursor("primary", { mode: "history", historyId: "old" });
@@ -719,7 +752,7 @@ test("runtime status and inspect expose safe operator state", async (t) => {
   });
 
   await runtime.runOnce();
-  const status = runtime.status() as { sources?: Array<{ stats?: Record<string, unknown> }> };
+  const status = runtime.status() as { sources?: Array<{ stats?: Record<string, unknown>; readiness?: Record<string, unknown> }> };
   const inspection = runtime.inspectMessage("primary", "msg-1") as {
     processed?: boolean;
     events?: unknown[];
@@ -729,11 +762,37 @@ test("runtime status and inspect expose safe operator state", async (t) => {
   };
 
   assert.equal(status.sources?.[0]?.stats?.processed, 1);
+  assert.equal(status.sources?.[0]?.readiness?.authConfigured, false);
+  assert.equal(status.sources?.[0]?.readiness?.canModifyGmail, true);
   assert.equal(inspection.processed, true);
   assert.equal(inspection.events?.length, 1);
   assert.equal(inspection.decisions?.length, 1);
   assert.equal(inspection.latestActionStatuses?.length, 1);
   assert.equal(inspection.actionAttempts?.length, 1);
+});
+
+test("runtime status reflects credential scope modify limits from cursor", async (t) => {
+  const stateStore = await tempStore(t);
+  stateStore.setSourceCursor("primary", {
+    credentialScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+  });
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => {
+      throw new Error("not used");
+    },
+  });
+
+  const status = runtime.status() as { sources?: Array<{ readiness?: Record<string, unknown> }> };
+
+  assert.equal(status.sources?.[0]?.readiness?.configuredModifyScope, true);
+  assert.equal(status.sources?.[0]?.readiness?.credentialModifyScope, false);
+  assert.equal(status.sources?.[0]?.readiness?.canModifyGmail, false);
 });
 
 test("runtime status counts all pending aggregate rows", async (t) => {

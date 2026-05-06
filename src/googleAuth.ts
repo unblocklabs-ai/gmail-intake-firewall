@@ -9,6 +9,11 @@ export type GoogleAuthMaterial = {
   scopes?: string[];
 };
 
+const GMAIL_MODIFY_SCOPES = new Set([
+  "https://www.googleapis.com/auth/gmail.modify",
+  "https://mail.google.com/",
+]);
+
 export type SecretResolver = {
   resolveSecret(ref: unknown): Promise<unknown>;
 };
@@ -35,6 +40,13 @@ export function resolveSecretResolver(host: unknown): SecretResolver | undefined
     }
   }
   return undefined;
+}
+
+export function gmailScopesAllowModify(scopes: string[] | undefined): boolean | undefined {
+  if (!scopes || scopes.length === 0) {
+    return undefined;
+  }
+  return scopes.some((scope) => GMAIL_MODIFY_SCOPES.has(scope));
 }
 
 export async function resolveGoogleAuthMaterial(

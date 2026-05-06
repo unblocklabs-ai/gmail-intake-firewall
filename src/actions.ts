@@ -26,7 +26,7 @@ export function buildQuarantineActions(
   }
   for (const sink of config.alertSinks.filter((candidate) => candidate.enabled)) {
     if (sink.kind === "local_log") {
-      actions.push({ type: "local_log", summary: classification.safeSummary, payload: buildSuspiciousAlertPayload(message, classification) });
+      actions.push({ type: "local_log", summary: classification.safeSummary, payload: buildSuspiciousAlertPayload(message, classification, config.security.includeSnippetInAlerts) });
       continue;
     }
     if (sink.kind === "slack") {
@@ -34,7 +34,7 @@ export function buildQuarantineActions(
         type: "human_alert",
         sink: "slack",
         summary: classification.safeSummary,
-        payload: buildSuspiciousAlertPayload(message, classification),
+        payload: buildSuspiciousAlertPayload(message, classification, config.security.includeSnippetInAlerts),
       };
       const target = sink.target ?? config.security.alertTarget;
       if (target) {
@@ -44,7 +44,7 @@ export function buildQuarantineActions(
     }
   }
   if (!actions.some((action) => action.type === "human_alert" || action.type === "local_log")) {
-    actions.push({ type: "local_log", summary: classification.safeSummary, payload: buildSuspiciousAlertPayload(message, classification) });
+    actions.push({ type: "local_log", summary: classification.safeSummary, payload: buildSuspiciousAlertPayload(message, classification, config.security.includeSnippetInAlerts) });
   }
   return actions;
 }
@@ -275,8 +275,9 @@ function buildAggregateItem(message: InboundMessage, routing: RoutingClassificat
 function buildSuspiciousAlertPayload(
   message: InboundMessage,
   classification: SecurityClassification,
+  includeSnippet: boolean,
 ): Record<string, unknown> {
-  return {
+  const payload: Record<string, unknown> = {
     sourceId: message.sourceId,
     accountEmail: message.accountEmail,
     sender: message.from,
@@ -295,7 +296,6 @@ function buildSuspiciousAlertPayload(
       dkimSignature: findHeader(message.headers, "dkim-signature"),
       arcAuthenticationResults: findHeader(message.headers, "arc-authentication-results"),
     },
-    snippet: message.snippet,
     linkDomains: Array.from(new Set((message.linkUrls ?? []).flatMap((url) => {
       try {
         return [new URL(url).hostname.toLowerCase()];
@@ -308,6 +308,10 @@ function buildSuspiciousAlertPayload(
     suspiciousSignals: classification.suspiciousSignals,
     sanitizedSummary: classification.safeSummary,
   };
+  if (includeSnippet && message.snippet) {
+    payload.snippet = message.snippet;
+  }
+  return payload;
 }
 
 function findHeader(headers: Record<string, string>, name: string): string | undefined {

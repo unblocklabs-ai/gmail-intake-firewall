@@ -4,6 +4,7 @@ const DEFAULT_SECURITY = {
     maliciousThreshold: 0.65,
     uncertainThreshold: 0.35,
     failClosedOnUncertain: true,
+    includeSnippetInAlerts: false,
     archiveOnQuarantine: false,
 };
 const DEFAULT_CONFIG = {
@@ -179,6 +180,7 @@ export function resolvePluginConfig(rawConfig) {
         maliciousThreshold: numberInRange(securityRaw.maliciousThreshold, DEFAULT_SECURITY.maliciousThreshold),
         uncertainThreshold: numberInRange(securityRaw.uncertainThreshold, DEFAULT_SECURITY.uncertainThreshold),
         failClosedOnUncertain: booleanValue(securityRaw.failClosedOnUncertain, DEFAULT_SECURITY.failClosedOnUncertain),
+        includeSnippetInAlerts: booleanValue(securityRaw.includeSnippetInAlerts, DEFAULT_SECURITY.includeSnippetInAlerts),
         ...(alertTarget ? { alertTarget } : {}),
         archiveOnQuarantine: booleanValue(securityRaw.archiveOnQuarantine, DEFAULT_SECURITY.archiveOnQuarantine),
     };

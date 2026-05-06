@@ -1,3 +1,7 @@
+const GMAIL_MODIFY_SCOPES = new Set([
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://mail.google.com/",
+]);
 export function resolveSecretResolver(host) {
     if (!host || typeof host !== "object") {
         return undefined;
@@ -20,6 +24,12 @@ export function resolveSecretResolver(host) {
         }
     }
     return undefined;
+}
+export function gmailScopesAllowModify(scopes) {
+    if (!scopes || scopes.length === 0) {
+        return undefined;
+    }
+    return scopes.some((scope) => GMAIL_MODIFY_SCOPES.has(scope));
 }
 export async function resolveGoogleAuthMaterial(source, resolver) {
     const ref = source.authRef ?? source.credentialRef;

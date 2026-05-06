@@ -1,6 +1,6 @@
 import { resolvePluginConfig, validatePluginConfig } from "./config.js";
 import { createGoogleapisGmailClient } from "./gmailClient.js";
-import { resolveGoogleAuthMaterial, resolveSecretResolver } from "./googleAuth.js";
+import { gmailScopesAllowModify, resolveGoogleAuthMaterial, resolveSecretResolver } from "./googleAuth.js";
 import { createHostActionDeps } from "./hostActions.js";
 import { createOpenAiRouterClassifier } from "./openaiRouterClassifier.js";
 import { createOpenAiSecurityClassifier, resolveOpenAiApiKey } from "./openaiSecurityClassifier.js";
@@ -37,8 +37,11 @@ function buildOperatorStatusTool(service) {
         properties: {
             operation: {
                 type: "string",
-                enum: ["status", "probe", "validateConfig"],
+                enum: ["status", "probe", "validateConfig", "checkSourceAuth"],
                 default: "status",
+            },
+            sourceId: {
+                type: "string",
             },
         },
     };
@@ -52,12 +55,18 @@ function buildOperatorStatusTool(service) {
         if (operation === "validateConfig") {
             return service.validateConfig();
         }
+        if (operation === "checkSourceAuth") {
+            const sourceId = typeof input.sourceId === "string"
+                ? input.sourceId
+                : undefined;
+            return service.checkSourceAuth(sourceId ? { sourceId } : {});
+        }
         return service.status();
     };
     return {
         id: "gmail_intake_firewall_status",
         name: "gmail_intake_firewall_status",
-        description: "Read-only operator status, probe, and config validation for the Gmail intake firewall plugin.",
+        description: "Read-only operator status, probe, config validation, and redacted Gmail auth checks for the Gmail intake firewall plugin.",
         inputSchema: schema,
         schema,
         parameters: schema,
@@ -248,6 +257,37 @@ function buildGmailIntakeFirewallService(config, host, logger) {
                 ...await runtime.drainAggregates(),
             };
         },
+        async checkSourceAuth(options) {
+            const sourceId = typeof options.sourceId === "string" ? options.sourceId : undefined;
+            const sources = sourceId
+                ? config.sources.filter((source) => source.id === sourceId)
+                : config.sources;
+            if (sourceId && sources.length === 0) {
+                return {
+                    ok: false,
+                    service: "gmail-intake-firewall-service",
+                    error: `Unknown source: ${sourceId}`,
+                };
+            }
+            const secretResolver = resolveSecretResolver(host);
+            if (!secretResolver) {
+                return {
+                    ok: false,
+                    service: "gmail-intake-firewall-service",
+                    error: "Host secret resolver is unavailable.",
+                    sources: sources.map((source) => safeSourceAuthStatus(source)),
+                };
+            }
+            const checks = [];
+            for (const source of sources) {
+                checks.push(await checkSourceAuthMaterial(source, secretResolver));
+            }
+            return {
+                ok: checks.every((check) => check.ok),
+                service: "gmail-intake-firewall-service",
+                sources: checks,
+            };
+        },
         async recordFeedback(event) {
             if (!stateStore) {
                 throw new Error("gmail-intake-firewall service is not started");
@@ -255,6 +295,69 @@ function buildGmailIntakeFirewallService(config, host, logger) {
             stateStore.recordFeedback(event);
             return { ok: true };
         },
+    };
+}
+async function checkSourceAuthMaterial(source, secretResolver) {
+    if (!secretResolver) {
+        return safeSourceAuthStatus(source, "secret_resolver_unavailable");
+    }
+    try {
+        const material = await resolveGoogleAuthMaterial(source, secretResolver);
+        const hasAccessToken = Boolean(material.accessToken);
+        const hasRefreshToken = Boolean(material.refreshToken);
+        const hasClientId = Boolean(material.clientId);
+        const hasClientSecret = Boolean(material.clientSecret);
+        const credentialShapeOk = hasAccessToken || (hasRefreshToken && hasClientId && hasClientSecret);
+        const configuredModifyScope = source.gmailActions.enabled && source.gmailActions.hasModifyScope;
+        const credentialModifyScope = gmailScopesAllowModify(material.scopes);
+        const canModifyGmail = configuredModifyScope && credentialModifyScope !== false;
+        if (material.tokenType === "workspace_domain_wide_delegation") {
+            return {
+                ...safeSourceAuthStatus(source),
+                ok: false,
+                tokenType: material.tokenType,
+                hasAccessToken,
+                hasRefreshToken,
+                hasClientId,
+                hasClientSecret,
+                scopes: material.scopes ?? [],
+                configuredModifyScope,
+                credentialModifyScope,
+                canModifyGmail,
+                error: "Workspace domain-wide delegation is not implemented in v1.",
+            };
+        }
+        return {
+            ...safeSourceAuthStatus(source),
+            ok: credentialShapeOk,
+            tokenType: material.tokenType,
+            hasAccessToken,
+            hasRefreshToken,
+            hasClientId,
+            hasClientSecret,
+            scopes: material.scopes ?? [],
+            configuredModifyScope,
+            credentialModifyScope,
+            canModifyGmail,
+        };
+    }
+    catch (error) {
+        return {
+            ...safeSourceAuthStatus(source),
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
+}
+function safeSourceAuthStatus(source, error) {
+    return {
+        sourceId: source.id,
+        accountEmail: source.accountEmail,
+        enabled: source.enabled,
+        authRefConfigured: Boolean(source.authRef),
+        credentialRefConfigured: Boolean(source.credentialRef),
+        ok: false,
+        ...(error ? { error } : {}),
     };
 }
 function hasRegisterService(api) {

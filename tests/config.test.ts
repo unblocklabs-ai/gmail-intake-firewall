@@ -49,3 +49,8 @@ test("config validation accepts a complete operator policy", () => {
 
   assert.deepEqual(validatePluginConfig(config), []);
 });
+
+test("security alert snippets are opt-in and disabled by default", () => {
+  assert.equal(resolvePluginConfig({}).security.includeSnippetInAlerts, false);
+  assert.equal(resolvePluginConfig({ security: { includeSnippetInAlerts: true } }).security.includeSnippetInAlerts, true);
+});

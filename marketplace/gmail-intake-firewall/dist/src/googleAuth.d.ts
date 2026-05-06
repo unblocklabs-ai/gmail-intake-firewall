@@ -11,5 +11,6 @@ export type SecretResolver = {
     resolveSecret(ref: unknown): Promise<unknown>;
 };
 export declare function resolveSecretResolver(host: unknown): SecretResolver | undefined;
+export declare function gmailScopesAllowModify(scopes: string[] | undefined): boolean | undefined;
 export declare function resolveGoogleAuthMaterial(source: GmailSourceConfig, resolver: SecretResolver): Promise<GoogleAuthMaterial>;
 //# sourceMappingURL=googleAuth.d.ts.map

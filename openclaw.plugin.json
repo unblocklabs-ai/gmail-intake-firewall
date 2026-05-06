@@ -64,6 +64,11 @@
     "security.alertTarget": {
       "label": "Alert Target",
       "advanced": true
+    },
+    "security.includeSnippetInAlerts": {
+      "label": "Include Snippet In Security Alerts",
+      "help": "When enabled, suspicious-mail alerts may include Gmail's snippet. Disabled by default to avoid body excerpts in quarantine notifications.",
+      "advanced": true
     }
   },
   "configSchema": {
@@ -235,6 +240,11 @@
             "type": "boolean",
             "default": true,
             "description": "When true, uncertain security classifications quarantine regardless of numeric risk score."
+          },
+          "includeSnippetInAlerts": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true, suspicious-mail alerts may include Gmail's snippet. Full body is never included."
           },
           "alertTarget": {
             "type": "string"

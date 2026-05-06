@@ -1,6 +1,7 @@
 import { buildDigestWake } from "./aggregate.js";
 import { executePlannedActions, requiredActionsSucceeded, type ActionExecutorDeps } from "./actions.js";
 import { buildCandidateQuery, candidateToIntakeEvent, type GmailCandidate, type GmailClient, type GmailHistoryPage } from "./gmail.js";
+import { gmailScopesAllowModify } from "./googleAuth.js";
 import { processMessage, type ProcessMessageDeps } from "./engine.js";
 import { createNoopRouterClassifier } from "./routerClassifier.js";
 import { createUnavailableSecurityClassifier } from "./securityClassifier.js";
@@ -199,15 +200,25 @@ export class GmailIntakePollingRuntime {
   }
 
   status(): Record<string, unknown> {
-    const sources = this.config.sources.map((source) => ({
-      id: source.id,
-      accountEmail: source.accountEmail,
-      enabled: source.enabled,
-      intakeMode: source.intakeMode ?? "poll",
-      polling: source.polling,
-      cursor: this.deps.stateStore.getSourceCursor(source.id),
-      stats: this.deps.stateStore.getSourceStats(source.id),
-    }));
+    const sources = this.config.sources.map((source) => {
+      const cursor = this.deps.stateStore.getSourceCursor(source.id);
+      return {
+        id: source.id,
+        accountEmail: source.accountEmail,
+        enabled: source.enabled,
+        intakeMode: source.intakeMode ?? "poll",
+        polling: source.polling,
+        gmailActions: {
+          enabled: source.gmailActions.enabled,
+          applyLabels: source.gmailActions.applyLabels,
+          archive: source.gmailActions.archive,
+          hasModifyScope: source.gmailActions.hasModifyScope,
+        },
+        readiness: buildSourceReadiness(source, cursor, this.now()),
+        cursor,
+        stats: this.deps.stateStore.getSourceStats(source.id),
+      };
+    });
     return {
       running: this.running,
       enabled: this.config.enabled,
@@ -487,6 +498,36 @@ export class GmailIntakePollingRuntime {
   private now(): Date {
     return (this.deps.now ?? (() => new Date()))();
   }
+}
+
+function buildSourceReadiness(source: GmailSourceConfig, cursor: Record<string, unknown> | undefined, now: Date): Record<string, unknown> {
+  const mode = source.intakeMode ?? "poll";
+  const historyId = typeof cursor?.historyId === "string" ? cursor.historyId : undefined;
+  const watchExpiresAt = typeof cursor?.watchExpiresAt === "string" ? cursor.watchExpiresAt : undefined;
+  const watchExpiresMs = watchExpiresAt ? Date.parse(watchExpiresAt) : Number.NaN;
+  const watchActive = Number.isFinite(watchExpiresMs) && watchExpiresMs > now.getTime();
+  const watchNeedsRenewal = mode === "watch" && (!watchActive || watchExpiresMs <= now.getTime() + 3600000);
+  const configuredModifyScope = source.gmailActions.enabled && source.gmailActions.hasModifyScope;
+  const credentialScopes = Array.isArray(cursor?.credentialScopes)
+    ? cursor.credentialScopes.filter((scope): scope is string => typeof scope === "string")
+    : undefined;
+  const credentialModifyScope = gmailScopesAllowModify(credentialScopes);
+  return {
+    mode,
+    authConfigured: Boolean(source.authRef ?? source.credentialRef),
+    configuredModifyScope,
+    ...(credentialModifyScope !== undefined ? { credentialModifyScope } : {}),
+    canModifyGmail: configuredModifyScope && credentialModifyScope !== false,
+    cursorPresent: Boolean(cursor),
+    historyCursorPresent: Boolean(historyId),
+    ...(historyId ? { historyId } : {}),
+    ...(watchExpiresAt ? { watchExpiresAt } : {}),
+    ...(mode === "watch" ? {
+      watchTopicConfigured: Boolean(source.watchTopicName),
+      watchActive,
+      watchNeedsRenewal,
+    } : {}),
+  };
 }
 
 function aggregateItemDue(queuedAt: string, cadence: string | undefined, now: Date, timezone: string): boolean {
