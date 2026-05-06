@@ -8,6 +8,7 @@ import { registerGmailIntakeFirewallPlugin } from "../src/plugin.js";
 type CapturedService = {
   start(): Promise<Record<string, unknown>>;
   stop(): Promise<Record<string, unknown>>;
+  probe(): Promise<Record<string, unknown>>;
   status(): Promise<Record<string, unknown>>;
   validateConfig(): Promise<Record<string, unknown>>;
   backfill(options: Record<string, unknown>): Promise<Record<string, unknown>>;
@@ -44,6 +45,57 @@ test("plugin service exposes validation and status operator methods", async () =
   assert.equal(status.started, true);
   assert.equal(Array.isArray(status.sources), true);
   assert.equal(Array.isArray(status.runtimeReadiness), true);
+});
+
+test("plugin prefers api.pluginConfig over api.config", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gmail-intake-plugin-"));
+  let service: CapturedService | undefined;
+  registerGmailIntakeFirewallPlugin({
+    config: {
+      dryRun: true,
+      sqlitePath: join(dir, "wrong.sqlite"),
+      sources: [],
+    },
+    pluginConfig: {
+      dryRun: true,
+      sqlitePath: join(dir, "right.sqlite"),
+      sources: [{
+        id: "primary",
+        accountEmail: "user@example.com",
+        authRef: { source: "openclaw", provider: "secrets", id: "gmail-primary" },
+      }],
+    },
+    registerService(candidate: unknown) {
+      service = candidate as typeof service;
+    },
+  });
+
+  assert.ok(service);
+  const status = await service.probe();
+
+  assert.equal(status.configuredSources, 1);
+  assert.equal(status.sqlitePath, join(dir, "right.sqlite"));
+});
+
+test("plugin registers read-only operator status tool when host supports tools", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gmail-intake-plugin-"));
+  let tool: { id: string; run(input: unknown): Promise<Record<string, unknown>> } | undefined;
+  registerGmailIntakeFirewallPlugin({
+    pluginConfig: {
+      dryRun: true,
+      sqlitePath: join(dir, "state.sqlite"),
+      sources: [],
+    },
+    registerTool(candidate: unknown) {
+      tool = candidate as typeof tool;
+    },
+  });
+
+  assert.ok(tool);
+  assert.equal(tool.id, "gmail_intake_firewall_status");
+  const result = await tool.run({ operation: "validateConfig" });
+  assert.equal(result.ok, true);
+  assert.equal(result.service, "gmail-intake-firewall-service");
 });
 
 test("plugin service rejects unbounded backfill unless explicitly allowed", async () => {

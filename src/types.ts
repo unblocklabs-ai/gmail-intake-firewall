@@ -1,5 +1,5 @@
 export type WakeMode = "none" | "wake_now" | "aggregate";
-export type SecurityVerdict = "safe" | "uncertain" | "risky";
+export type SecurityVerdict = "safe" | "uncertain" | "risky" | "malicious";
 export type AlertSinkKind = "slack" | "local_log";
 export type IntakeMode = "watch" | "history" | "poll";
 

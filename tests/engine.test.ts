@@ -437,6 +437,29 @@ test("uncertain classification quarantines by default", async () => {
   assert.ok(result.decision?.actions.some((action) => action.type === "human_alert"));
 });
 
+test("malicious classification quarantines before routing", async () => {
+  const result = await processMessage(baseMessage, config(), createEmptyState(), {
+    securityClassifier: security({
+      verdict: "malicious",
+      riskScore: 0.99,
+      categories: ["credential_theft"],
+      reasons: ["Fake login link"],
+      safeSummary: "Credential theft attempt.",
+      suspiciousSignals: ["fake login"],
+    }),
+    routerClassifier: router({
+      tags: ["client-dev"],
+      wakeMode: "wake_now",
+      sanitizedSummary: "Should not run",
+      reasons: [],
+    }),
+  });
+
+  assert.equal(result.decision?.routing, undefined);
+  assert.ok(result.decision?.actions.some((action) => action.type === "gmail_label"));
+  assert.ok(result.decision?.actions.some((action) => action.type === "human_alert"));
+});
+
 test("read-only Gmail scope degrades to alert and log without label/archive", async () => {
   const readonlyConfig = config({
     sources: [

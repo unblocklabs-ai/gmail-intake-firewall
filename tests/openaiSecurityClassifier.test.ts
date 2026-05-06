@@ -73,6 +73,28 @@ test("OpenAI classifier sends structured output request and normalizes response"
   assert.equal((calls[0]?.init?.headers as Record<string, string>).Authorization, "Bearer test-key");
 });
 
+test("OpenAI classifier accepts explicit malicious verdict", async () => {
+  const classifier = createOpenAiSecurityClassifier({
+    apiKey: "test-key",
+    model: "gpt-5.5",
+    fetch: async () => new Response(JSON.stringify({
+      output_text: JSON.stringify({
+        verdict: "malicious",
+        riskScore: 0.98,
+        categories: ["phishing"],
+        reasons: ["Credential theft attempt."],
+        safeSummary: "Credential theft attempt.",
+        suspiciousSignals: ["fake login"],
+      }),
+    }), { status: 200 }),
+  });
+
+  const result = await classifier.classify(normalized);
+
+  assert.equal(result.verdict, "malicious");
+  assert.equal(result.riskScore, 0.98);
+});
+
 test("OpenAI classifier fails closed on API error", async () => {
   const classifier = createOpenAiSecurityClassifier({
     apiKey: "test-key",

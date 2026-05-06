@@ -14,7 +14,7 @@ export function shouldQuarantine(
   classification: SecurityClassification,
   security: SecurityConfig,
 ): boolean {
-  if (classification.verdict === "risky") {
+  if (classification.verdict === "risky" || classification.verdict === "malicious") {
     return classification.riskScore >= security.maliciousThreshold;
   }
   if (classification.verdict === "uncertain") {

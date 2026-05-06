@@ -18,7 +18,7 @@ type RuntimeReadinessFinding = {
 
 export function registerGmailIntakeFirewallPlugin(api: unknown): void {
   const host = api && typeof api === "object" ? api as Record<string, unknown> : {};
-  const rawConfig = "config" in host ? host.config : undefined;
+  const rawConfig = "pluginConfig" in host ? host.pluginConfig : "config" in host ? host.config : undefined;
   const config = resolvePluginConfig(rawConfig);
 
   const logger = host.logger && typeof host.logger === "object"
@@ -31,12 +31,65 @@ export function registerGmailIntakeFirewallPlugin(api: unknown): void {
     sources: config.sources.length,
   });
 
+  const service = buildGmailIntakeFirewallService(config, api, logger);
+
   if (hasRegisterService(api)) {
-    api.registerService(buildGmailIntakeFirewallService(config, api, logger));
+    api.registerService(service);
+  }
+
+  if (hasRegisterTool(api)) {
+    api.registerTool(buildOperatorStatusTool(service));
   }
 
   void createUnavailableSecurityClassifier();
   void createNoopRouterClassifier();
+}
+
+function buildOperatorStatusTool(service: ReturnType<typeof buildGmailIntakeFirewallService>): {
+  id: string;
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  schema: Record<string, unknown>;
+  parameters: Record<string, unknown>;
+  handler: (input: unknown) => Promise<Record<string, unknown>>;
+  run: (input: unknown) => Promise<Record<string, unknown>>;
+  execute: (input: unknown) => Promise<Record<string, unknown>>;
+} {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      operation: {
+        type: "string",
+        enum: ["status", "probe", "validateConfig"],
+        default: "status",
+      },
+    },
+  };
+  const run = async (input: unknown): Promise<Record<string, unknown>> => {
+    const operation = input && typeof input === "object" && "operation" in input
+      ? (input as { operation?: unknown }).operation
+      : "status";
+    if (operation === "probe") {
+      return service.probe();
+    }
+    if (operation === "validateConfig") {
+      return service.validateConfig();
+    }
+    return service.status();
+  };
+  return {
+    id: "gmail_intake_firewall_status",
+    name: "gmail_intake_firewall_status",
+    description: "Read-only operator status, probe, and config validation for the Gmail intake firewall plugin.",
+    inputSchema: schema,
+    schema,
+    parameters: schema,
+    handler: run,
+    run,
+    execute: run,
+  };
 }
 
 function buildGmailIntakeFirewallService(
@@ -253,6 +306,12 @@ function hasRegisterService(api: unknown): api is {
   registerService: (service: unknown) => unknown;
 } {
   return Boolean(api && typeof api === "object" && typeof (api as { registerService?: unknown }).registerService === "function");
+}
+
+function hasRegisterTool(api: unknown): api is {
+  registerTool: (tool: unknown) => unknown;
+} {
+  return Boolean(api && typeof api === "object" && typeof (api as { registerTool?: unknown }).registerTool === "function");
 }
 
 async function validateRuntimeReadiness(

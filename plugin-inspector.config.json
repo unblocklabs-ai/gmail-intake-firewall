@@ -9,7 +9,8 @@
     "sourceRoot": "src",
     "expect": {
       "registrations": [
-        "registerService"
+        "registerService",
+        "registerTool"
       ]
     }
   },
