@@ -48,6 +48,7 @@ export function registerGmailIntakeFirewallPlugin(api: unknown): void {
 
   if (hasRegisterTool(api)) {
     api.registerTool(buildOperatorStatusTool(service), { name: "gmail_intake_firewall_status" });
+    api.registerTool(buildReviewTool(service), { name: "gmail_intake_firewall_review" });
   }
 
   if (hasRegisterHttpRoute(api)) {
@@ -202,6 +203,93 @@ function buildOperatorStatusTool(service: ReturnType<typeof buildGmailIntakeFire
   };
 }
 
+function buildReviewTool(service: ReturnType<typeof buildGmailIntakeFirewallService>): {
+  id: string;
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  schema: Record<string, unknown>;
+  parameters: Record<string, unknown>;
+  handler: (input: unknown) => Promise<Record<string, unknown>>;
+  run: (input: unknown) => Promise<Record<string, unknown>>;
+  execute: (input: unknown) => Promise<Record<string, unknown>>;
+} {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      operation: {
+        type: "string",
+        enum: ["listQuarantine", "getQuarantineItem", "recordFeedback", "markHarmful", "wakeNow", "muteSender", "alwaysAggregate"],
+      },
+      sourceId: { type: "string" },
+      messageId: { type: "string" },
+      actor: { type: "string" },
+      reason: { type: "string" },
+      feedbackType: { type: "string" },
+      sender: { type: "string" },
+      wakeTarget: { type: "string" },
+      limit: { type: "number" },
+      dryRun: { type: "boolean" },
+    },
+    required: ["operation"],
+  };
+  const run = async (input: unknown): Promise<Record<string, unknown>> => {
+    const normalizedInput = normalizeToolInput(input);
+    const operation = typeof normalizedInput?.operation === "string" ? normalizedInput.operation : undefined;
+    if (operation === "listQuarantine") {
+      return service.listQuarantine({ limit: numberInput(normalizedInput?.limit, 25) });
+    }
+    const sourceId = typeof normalizedInput?.sourceId === "string" ? normalizedInput.sourceId : undefined;
+    const messageId = typeof normalizedInput?.messageId === "string" ? normalizedInput.messageId : undefined;
+    if (!sourceId || !messageId) {
+      throw new Error(`${operation ?? "review operation"} requires sourceId and messageId`);
+    }
+    const common = {
+      sourceId,
+      messageId,
+      ...(typeof normalizedInput?.actor === "string" ? { actor: normalizedInput.actor } : {}),
+      ...(typeof normalizedInput?.reason === "string" ? { reason: normalizedInput.reason } : {}),
+      ...(typeof normalizedInput?.sender === "string" ? { sender: normalizedInput.sender } : {}),
+    };
+    if (operation === "getQuarantineItem") {
+      return service.getQuarantineItem({ sourceId, messageId });
+    }
+    if (operation === "markHarmful") {
+      return service.recordReviewFeedback({ ...common, feedbackType: "harmful" });
+    }
+    if (operation === "muteSender") {
+      return service.recordReviewFeedback({ ...common, feedbackType: "mute_sender" });
+    }
+    if (operation === "alwaysAggregate") {
+      return service.recordReviewFeedback({ ...common, feedbackType: "always_aggregate" });
+    }
+    if (operation === "wakeNow") {
+      return service.wakeReviewedMessage({
+        ...common,
+        ...(typeof normalizedInput?.wakeTarget === "string" ? { wakeTarget: normalizedInput.wakeTarget } : {}),
+        ...(typeof normalizedInput?.dryRun === "boolean" ? { dryRun: normalizedInput.dryRun } : {}),
+      });
+    }
+    if (operation === "recordFeedback") {
+      const feedbackType = typeof normalizedInput?.feedbackType === "string" ? normalizedInput.feedbackType : "feedback";
+      return service.recordReviewFeedback({ ...common, feedbackType });
+    }
+    throw new Error(`Unknown review operation: ${operation ?? "undefined"}`);
+  };
+  return {
+    id: "gmail_intake_firewall_review",
+    name: "gmail_intake_firewall_review",
+    description: "Text-based quarantine review and feedback tool for Gmail intake firewall decisions.",
+    inputSchema: schema,
+    schema,
+    parameters: schema,
+    handler: run,
+    run,
+    execute: run,
+  };
+}
+
 function normalizeToolInput(input: unknown): Record<string, unknown> | undefined {
   if (!input || typeof input !== "object") {
     return undefined;
@@ -217,6 +305,10 @@ function normalizeToolInput(input: unknown): Record<string, unknown> | undefined
     }
   }
   return raw;
+}
+
+function numberInput(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 function buildGmailIntakeFirewallService(
@@ -239,6 +331,10 @@ function buildGmailIntakeFirewallService(
   handleGmailNotification: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   checkSourceAuth: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   recordFeedback: (event: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  listQuarantine: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  getQuarantineItem: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  recordReviewFeedback: (event: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  wakeReviewedMessage: (event: Record<string, unknown>) => Promise<Record<string, unknown>>;
 } {
   let runtime: GmailIntakePollingRuntime | undefined;
   let stateStore: SqliteStateStore | undefined;
@@ -478,6 +574,76 @@ function buildGmailIntakeFirewallService(
       }
       stateStore.recordFeedback(event);
       return { ok: true };
+    },
+    async listQuarantine(options) {
+      if (!runtime) {
+        throw new Error("gmail-intake-firewall service is not started");
+      }
+      return {
+        ok: true,
+        service: "gmail-intake-firewall-service",
+        ...runtime.listQuarantine(numberInput(options.limit, 25)),
+      };
+    },
+    async getQuarantineItem(options) {
+      if (!runtime) {
+        throw new Error("gmail-intake-firewall service is not started");
+      }
+      const sourceId = typeof options.sourceId === "string" ? options.sourceId : undefined;
+      const messageId = typeof options.messageId === "string" ? options.messageId : undefined;
+      if (!sourceId || !messageId) {
+        throw new Error("getQuarantineItem requires sourceId and messageId");
+      }
+      return {
+        ok: true,
+        service: "gmail-intake-firewall-service",
+        ...runtime.getQuarantineItem(sourceId, messageId),
+      };
+    },
+    async recordReviewFeedback(event) {
+      if (!runtime) {
+        throw new Error("gmail-intake-firewall service is not started");
+      }
+      const sourceId = typeof event.sourceId === "string" ? event.sourceId : undefined;
+      const messageId = typeof event.messageId === "string" ? event.messageId : undefined;
+      const feedbackType = typeof event.feedbackType === "string" ? event.feedbackType : undefined;
+      if (!sourceId || !messageId || !feedbackType) {
+        throw new Error("recordReviewFeedback requires sourceId, messageId, and feedbackType");
+      }
+      return {
+        ok: true,
+        service: "gmail-intake-firewall-service",
+        ...runtime.recordReviewFeedback({
+          sourceId,
+          messageId,
+          feedbackType,
+          ...(typeof event.actor === "string" ? { actor: event.actor } : {}),
+          ...(typeof event.reason === "string" ? { reason: event.reason } : {}),
+          ...(typeof event.sender === "string" ? { sender: event.sender } : {}),
+        }),
+      };
+    },
+    async wakeReviewedMessage(event) {
+      if (!runtime) {
+        throw new Error("gmail-intake-firewall service is not started");
+      }
+      const sourceId = typeof event.sourceId === "string" ? event.sourceId : undefined;
+      const messageId = typeof event.messageId === "string" ? event.messageId : undefined;
+      if (!sourceId || !messageId) {
+        throw new Error("wakeReviewedMessage requires sourceId and messageId");
+      }
+      return {
+        ok: true,
+        service: "gmail-intake-firewall-service",
+        ...await runtime.wakeReviewedMessage({
+          sourceId,
+          messageId,
+          ...(typeof event.actor === "string" ? { actor: event.actor } : {}),
+          ...(typeof event.reason === "string" ? { reason: event.reason } : {}),
+          ...(typeof event.wakeTarget === "string" ? { wakeTarget: event.wakeTarget } : {}),
+          ...(typeof event.dryRun === "boolean" ? { dryRun: event.dryRun } : {}),
+        }),
+      };
     },
   };
 }

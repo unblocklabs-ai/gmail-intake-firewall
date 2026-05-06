@@ -120,6 +120,70 @@ test("polling runtime processes enabled source candidates and persists cursor", 
   });
 });
 
+test("runtime quarantine review returns safe payload and records text feedback", async (t) => {
+  const stateStore = await tempStore(t);
+  const client: GmailClient = {
+    async listCandidates() {
+      return [{ id: "msg-review", threadId: "thread-review" }];
+    },
+    async fetchMessage(candidate) {
+      return {
+        ...message(candidate.id),
+        bodyText: "RAW SECRET BODY SHOULD NOT LEAK",
+        snippet: "Snippet should not be used in review payload",
+        linkUrls: ["https://phish.example/login"],
+      };
+    },
+    async applyLabel() {},
+    async archive() {},
+  };
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+    wakeTargets: [{ id: "agent:dev", agentId: "dev-agent" }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => client,
+    securityClassifier: {
+      classify: async () => ({
+        verdict: "risky",
+        riskScore: 0.99,
+        categories: ["phishing"],
+        reasons: ["credential theft"],
+        safeSummary: "Suspicious login request.",
+        suspiciousSignals: ["fake login"],
+      }),
+    },
+    routerClassifier: {
+      classify: async () => {
+        throw new Error("router should not run for quarantine");
+      },
+    },
+  });
+
+  await runtime.runOnce();
+  const listed = runtime.listQuarantine(10).items as Array<Record<string, unknown>>;
+  assert.equal(listed.length, 1);
+  assert.equal(JSON.stringify(listed).includes("RAW SECRET BODY"), false);
+  assert.equal(JSON.stringify(listed).includes("Snippet should not"), false);
+  assert.deepEqual(listed[0]?.linkDomains, ["phish.example"]);
+
+  const feedback = runtime.recordReviewFeedback({
+    sourceId: "primary",
+    messageId: "msg-review",
+    feedbackType: "mute_sender",
+    actor: "bill",
+    reason: "not relevant",
+  });
+  assert.equal(feedback.recorded, true);
+
+  const item = runtime.getQuarantineItem("primary", "msg-review").item as Record<string, unknown>;
+  const events = item.feedback as Array<Record<string, unknown>>;
+  assert.equal(events[0]?.feedbackType, "mute_sender");
+});
+
 test("polling runtime skips already processed messages before fetch", async (t) => {
   const stateStore = await tempStore(t);
   const config = resolvePluginConfig({

@@ -133,8 +133,8 @@ test("plugin prefers api.pluginConfig over api.config", async () => {
 
 test("plugin registers read-only operator status tool when host supports tools", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gmail-intake-plugin-"));
-  let tool: { id: string; run(input: unknown): Promise<Record<string, unknown>> } | undefined;
-  let toolOptions: Record<string, unknown> | undefined;
+  const tools = new Map<string, { id: string; run(input: unknown): Promise<Record<string, unknown>> }>();
+  const toolOptions = new Map<string, Record<string, unknown> | undefined>();
   registerGmailIntakeFirewallPlugin({
     pluginConfig: {
       dryRun: true,
@@ -142,14 +142,18 @@ test("plugin registers read-only operator status tool when host supports tools",
       sources: [],
     },
     registerTool(candidate: unknown, options?: Record<string, unknown>) {
-      tool = candidate as typeof tool;
-      toolOptions = options;
+      const tool = candidate as { id: string; run(input: unknown): Promise<Record<string, unknown>> };
+      tools.set(tool.id, tool);
+      toolOptions.set(tool.id, options);
     },
   });
 
+  const tool = tools.get("gmail_intake_firewall_status");
   assert.ok(tool);
   assert.equal(tool.id, "gmail_intake_firewall_status");
-  assert.deepEqual(toolOptions, { name: "gmail_intake_firewall_status" });
+  assert.deepEqual(toolOptions.get("gmail_intake_firewall_status"), { name: "gmail_intake_firewall_status" });
+  assert.ok(tools.get("gmail_intake_firewall_review"));
+  assert.deepEqual(toolOptions.get("gmail_intake_firewall_review"), { name: "gmail_intake_firewall_review" });
   const result = await tool.run({ operation: "validateConfig" });
   assert.equal(result.ok, true);
   assert.equal(result.service, "gmail-intake-firewall-service");
@@ -184,7 +188,7 @@ test("plugin registers authenticated Pub/Sub HTTP route", async () => {
 test("plugin service and tool expose redacted source auth checks", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gmail-intake-plugin-"));
   let service: CapturedService | undefined;
-  let tool: { run(input: unknown): Promise<Record<string, unknown>> } | undefined;
+  const tools = new Map<string, { id: string; run(input: unknown): Promise<Record<string, unknown>> }>();
   registerGmailIntakeFirewallPlugin({
     pluginConfig: {
       dryRun: true,
@@ -209,10 +213,12 @@ test("plugin service and tool expose redacted source auth checks", async () => {
       service = candidate as typeof service;
     },
     registerTool(candidate: unknown) {
-      tool = candidate as typeof tool;
+      const tool = candidate as { id: string; run(input: unknown): Promise<Record<string, unknown>> };
+      tools.set(tool.id, tool);
     },
   });
 
+  const tool = tools.get("gmail_intake_firewall_status");
   assert.ok(service);
   assert.ok(tool);
   const serviceResult = await service.checkSourceAuth({ sourceId: "primary" });

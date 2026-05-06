@@ -19,7 +19,8 @@
   },
   "contracts": {
     "tools": [
-      "gmail_intake_firewall_status"
+      "gmail_intake_firewall_status",
+      "gmail_intake_firewall_review"
     ]
   },
   "uiHints": {

@@ -199,6 +199,100 @@ export class GmailIntakePollingRuntime {
             actionAttempts: this.deps.stateStore.listActionAttempts(sourceId, messageId),
         };
     }
+    listQuarantine(limit = 25) {
+        return {
+            items: this.deps.stateStore.listQuarantine(limit).map((decision) => safeQuarantineItem(decision, {
+                feedback: this.deps.stateStore.listFeedbackForMessage(String(decision.sourceId), String(decision.messageId), 10),
+                compact: true,
+            })),
+        };
+    }
+    getQuarantineItem(sourceId, messageId) {
+        const decision = this.deps.stateStore.listDecisions(sourceId, messageId, 1)[0];
+        if (!decision || decision.routing) {
+            return { found: false };
+        }
+        return {
+            found: true,
+            item: safeQuarantineItem(decision, {
+                feedback: this.deps.stateStore.listFeedbackForMessage(sourceId, messageId, 100),
+                actionStatuses: this.deps.stateStore.listActionStatuses(sourceId, messageId),
+                actionAttempts: this.deps.stateStore.listActionAttempts(sourceId, messageId),
+            }),
+        };
+    }
+    recordReviewFeedback(input) {
+        const decision = this.deps.stateStore.listDecisions(input.sourceId, input.messageId, 1)[0];
+        const event = {
+            createdAt: this.now().toISOString(),
+            sourceId: input.sourceId,
+            messageId: input.messageId,
+            threadId: typeof decision?.threadId === "string" ? decision.threadId : undefined,
+            feedbackType: input.feedbackType,
+            actor: input.actor,
+            reason: input.reason,
+            sender: input.sender ?? senderFromDecision(decision),
+        };
+        this.deps.stateStore.recordFeedback(event);
+        return { recorded: true, feedback: event };
+    }
+    async wakeReviewedMessage(input) {
+        const decision = this.deps.stateStore.listDecisions(input.sourceId, input.messageId, 1)[0];
+        if (!decision) {
+            return { found: false, executed: false };
+        }
+        const wakeTargetId = input.wakeTarget ?? firstWakeTargetId(this.config);
+        if (!wakeTargetId) {
+            return { found: true, executed: false, error: "No wake target is configured." };
+        }
+        const wakeTarget = this.config.wakeTargets.find((target) => target.id === wakeTargetId);
+        if (!wakeTarget) {
+            return { found: true, executed: false, error: `Unknown wake target: ${wakeTargetId}` };
+        }
+        const security = decision.security;
+        const payload = {
+            sourceId: input.sourceId,
+            accountEmail: String(decision.accountEmail),
+            messageId: input.messageId,
+            threadId: String(decision.threadId),
+            tags: ["human-reviewed"],
+            sanitizedSummary: security.safeSummary,
+            security,
+            wakeTarget,
+        };
+        const subject = subjectFromDecision(decision);
+        if (subject) {
+            payload.subject = subject;
+        }
+        const sender = senderFromDecision(decision);
+        if (sender) {
+            payload.from = sender;
+        }
+        const action = {
+            type: "agent_wake",
+            target: wakeTargetId,
+            payload,
+        };
+        const actionResults = await executePlannedActions([action], input.dryRun ?? this.config.dryRun, this.deps.actionDeps ?? {});
+        const feedbackInput = {
+            sourceId: input.sourceId,
+            messageId: input.messageId,
+            feedbackType: "wake_now",
+        };
+        if (input.actor) {
+            feedbackInput.actor = input.actor;
+        }
+        if (input.reason) {
+            feedbackInput.reason = input.reason;
+        }
+        const feedback = this.recordReviewFeedback(feedbackInput);
+        return {
+            found: true,
+            executed: actionResults.every((result) => result.status !== "failed"),
+            actionResults,
+            feedback: feedback.feedback,
+        };
+    }
     async replayEvent(options) {
         const summary = this.emptySummary();
         const source = this.config.sources.find((candidate) => candidate.id === options.sourceId);
@@ -545,6 +639,7 @@ export class GmailIntakePollingRuntime {
             const processDeps = {
                 securityClassifier: this.deps.securityClassifier ?? createUnavailableSecurityClassifier(),
                 routerClassifier: this.deps.routerClassifier ?? createNoopRouterClassifier(),
+                routingPreferences: this.deps.stateStore.listRoutingPreferences(event.sourceId),
             };
             if (this.deps.now) {
                 processDeps.now = this.deps.now;
@@ -746,6 +841,69 @@ function buildSourceReadiness(source, cursor, now) {
             watchNeedsRenewal,
         } : {}),
     };
+}
+function safeQuarantineItem(decision, options = {}) {
+    const alertPayload = suspiciousPayloadFromDecision(decision);
+    const item = {
+        sourceId: decision.sourceId,
+        accountEmail: decision.accountEmail,
+        messageId: decision.messageId,
+        threadId: decision.threadId,
+        processedAt: decision.processedAt,
+        dryRun: decision.dryRun,
+        security: decision.security,
+        sender: alertPayload?.sender,
+        replyTo: alertPayload?.replyTo,
+        recipients: alertPayload?.recipients,
+        cc: alertPayload?.cc,
+        subject: alertPayload?.subject,
+        date: alertPayload?.date,
+        gmailLink: alertPayload?.gmailLink,
+        labels: alertPayload?.labels,
+        authHeaders: alertPayload?.authHeaders,
+        linkDomains: alertPayload?.linkDomains,
+        attachments: alertPayload?.attachments,
+        riskReasons: alertPayload?.riskReasons,
+        suspiciousSignals: alertPayload?.suspiciousSignals,
+        sanitizedSummary: alertPayload?.sanitizedSummary ?? decision.security?.safeSummary,
+        feedback: options.feedback ?? [],
+    };
+    if (!options.compact) {
+        item.actions = decision.actions;
+        item.latestActionStatuses = options.actionStatuses ?? [];
+        item.actionAttempts = options.actionAttempts ?? [];
+    }
+    return removeUndefined(item);
+}
+function suspiciousPayloadFromDecision(decision) {
+    const actions = Array.isArray(decision.actions) ? decision.actions : [];
+    for (const action of actions) {
+        if (!action || typeof action !== "object") {
+            continue;
+        }
+        const payload = action.payload;
+        if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+            return payload;
+        }
+    }
+    return undefined;
+}
+function senderFromDecision(decision) {
+    if (!decision) {
+        return undefined;
+    }
+    const payload = suspiciousPayloadFromDecision(decision);
+    return typeof payload?.sender === "string" ? payload.sender : undefined;
+}
+function subjectFromDecision(decision) {
+    const payload = suspiciousPayloadFromDecision(decision);
+    return typeof payload?.subject === "string" ? payload.subject : undefined;
+}
+function firstWakeTargetId(config) {
+    return config.wakeTargets[0]?.id;
+}
+function removeUndefined(value) {
+    return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 function aggregateItemDue(queuedAt, cadence, now, timezone) {
     const queued = Date.parse(queuedAt);

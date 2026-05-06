@@ -20,7 +20,7 @@ export async function processMessage(message, config, state, deps) {
     const quarantined = shouldQuarantine(security, config.security);
     const routing = quarantined
         ? undefined
-        : await deps.routerClassifier.classify({ message, normalized, security }, config.tags);
+        : applyRoutingPreference(message, await deps.routerClassifier.classify({ message, normalized, security }, config.tags), config, deps.routingPreferences ?? []);
     const actions = quarantined
         ? buildQuarantineActions(message, security, config, source)
         : buildSafeRoutingActions(message, routing, security, config.tags, config.wakeTargets, source);
@@ -38,4 +38,36 @@ export async function processMessage(message, config, state, deps) {
         decision.routing = routing;
     }
     return { state: recordDecision(state, decision), decision, skipped: false };
+}
+function applyRoutingPreference(message, routing, config, preferences) {
+    const sender = message.from?.toLowerCase();
+    if (!sender) {
+        return routing;
+    }
+    const preference = preferences.find((candidate) => candidate.sourceId === message.sourceId && candidate.sender === sender);
+    if (!preference) {
+        return routing;
+    }
+    if (preference.type === "mute_sender") {
+        return {
+            tags: [],
+            wakeMode: "none",
+            sanitizedSummary: routing.sanitizedSummary,
+            reasons: [...routing.reasons, `Human feedback preference muted sender ${message.from}`],
+        };
+    }
+    const aggregateTag = config.tags.find((tag) => tag.wakeMode === "aggregate");
+    if (!aggregateTag) {
+        return routing;
+    }
+    const aggregateRouting = {
+        tags: Array.from(new Set([...routing.tags, aggregateTag.id])),
+        wakeMode: "aggregate",
+        sanitizedSummary: routing.sanitizedSummary,
+        reasons: [...routing.reasons, `Human feedback preference always aggregates sender ${message.from}`],
+    };
+    if (aggregateTag.wakeTarget) {
+        aggregateRouting.wakeTarget = aggregateTag.wakeTarget;
+    }
+    return aggregateRouting;
 }

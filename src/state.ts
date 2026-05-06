@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ActionExecutionStatus } from "./actions.js";
-import type { AggregateItem, DecisionLogEntry, IntakeEvent } from "./types.js";
+import type { AggregateItem, DecisionLogEntry, IntakeEvent, RoutingPreference } from "./types.js";
 
 export type FirewallState = {
   processed: Record<string, string>;
@@ -92,6 +92,9 @@ export type SqliteStateStore = {
   recordEvent(event: IntakeEvent): void;
   recordFeedback(event: Record<string, unknown>): void;
   listFeedbackEvents(limit?: number): Array<Record<string, unknown>>;
+  listFeedbackForMessage(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
+  listRoutingPreferences(sourceId?: string): RoutingPreference[];
+  listQuarantine(limit?: number): Array<Record<string, unknown>>;
   listEvents(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
   findLatestEvent(sourceId: string, messageId: string): IntakeEvent | undefined;
   listDecisions(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
@@ -298,11 +301,79 @@ export function openSqliteStateStore(path: string): SqliteStateStore {
     },
     listFeedbackEvents(limit = 100): Array<Record<string, unknown>> {
       return db.prepare(
-        `SELECT created_at, source_id, message_id, thread_id, feedback_type, payload_json
+        `SELECT id, created_at, source_id, message_id, thread_id, feedback_type, payload_json
          FROM feedback_events
          ORDER BY created_at DESC
          LIMIT ?`,
-      ).all?.(limit) as Array<Record<string, unknown>> ?? [];
+      ).all?.(limit).map((row) => normalizeFeedbackRow(row as Record<string, unknown>)) ?? [];
+    },
+    listFeedbackForMessage(sourceId: string, messageId: string, limit = 100): Array<Record<string, unknown>> {
+      return db.prepare(
+        `SELECT id, created_at, source_id, message_id, thread_id, feedback_type, payload_json
+         FROM feedback_events
+         WHERE source_id = ? AND message_id = ?
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      ).all?.(sourceId, messageId, limit).map((row) => normalizeFeedbackRow(row as Record<string, unknown>)) ?? [];
+    },
+    listRoutingPreferences(sourceId?: string): RoutingPreference[] {
+      const rows = sourceId
+        ? db.prepare(
+          `SELECT payload_json
+           FROM feedback_events
+           WHERE source_id = ? AND feedback_type IN ('mute_sender', 'always_aggregate')
+           ORDER BY created_at DESC`,
+        ).all?.(sourceId) ?? []
+        : db.prepare(
+          `SELECT payload_json
+           FROM feedback_events
+           WHERE feedback_type IN ('mute_sender', 'always_aggregate')
+           ORDER BY created_at DESC`,
+        ).all?.() ?? [];
+      const preferences = new Map<string, RoutingPreference>();
+      for (const row of rows) {
+        const payload = parseJson((row as Record<string, unknown>).payload_json);
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          continue;
+        }
+        const raw = payload as Record<string, unknown>;
+        const prefSourceId = typeof raw.sourceId === "string" ? raw.sourceId : undefined;
+        const sender = typeof raw.sender === "string" ? raw.sender.toLowerCase() : undefined;
+        const feedbackType = raw.feedbackType;
+        if (!prefSourceId || !sender || (feedbackType !== "mute_sender" && feedbackType !== "always_aggregate")) {
+          continue;
+        }
+        const type = feedbackType === "mute_sender" ? "mute_sender" : "always_aggregate_sender";
+        const key = `${prefSourceId}:${sender}`;
+        if (preferences.has(key)) {
+          continue;
+        }
+        const preference: RoutingPreference = {
+          type,
+          sourceId: prefSourceId,
+          sender,
+          createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString(),
+        };
+        if (typeof raw.actor === "string") {
+          preference.actor = raw.actor;
+        }
+        if (typeof raw.reason === "string") {
+          preference.reason = raw.reason;
+        }
+        preferences.set(key, preference);
+      }
+      return [...preferences.values()];
+    },
+    listQuarantine(limit = 25): Array<Record<string, unknown>> {
+      const rows = db.prepare(
+        `SELECT id, processed_at, source_id, account_email, message_id, thread_id,
+          security_json, routing_json, actions_json, dry_run
+         FROM decisions
+         WHERE routing_json IS NULL
+         ORDER BY id DESC
+         LIMIT ?`,
+      ).all?.(limit) ?? [];
+      return rows.map((row) => normalizeDecisionRow(row as Record<string, unknown>));
     },
     listEvents(sourceId: string, messageId: string, limit = 25): Array<Record<string, unknown>> {
       return db.prepare(
@@ -593,6 +664,19 @@ function normalizeDecisionRow(row: Record<string, unknown>): Record<string, unkn
     routing: parseJson(row.routing_json),
     actions: parseJson(row.actions_json),
     dryRun: Boolean(row.dry_run),
+  };
+}
+
+function normalizeFeedbackRow(row: Record<string, unknown>): Record<string, unknown> {
+  const payload = parseJson(row.payload_json);
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    sourceId: row.source_id,
+    messageId: row.message_id,
+    threadId: row.thread_id,
+    feedbackType: row.feedback_type,
+    payload,
   };
 }
 

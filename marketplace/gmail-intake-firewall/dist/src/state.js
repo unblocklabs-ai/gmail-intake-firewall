@@ -167,10 +167,70 @@ export function openSqliteStateStore(path) {
         ) VALUES (?, ?, ?, ?, ?, ?)`).run(typeof event.createdAt === "string" ? event.createdAt : new Date().toISOString(), typeof event.sourceId === "string" ? event.sourceId : null, typeof event.messageId === "string" ? event.messageId : null, typeof event.threadId === "string" ? event.threadId : null, typeof event.feedbackType === "string" ? event.feedbackType : "unknown", JSON.stringify(event));
         },
         listFeedbackEvents(limit = 100) {
-            return db.prepare(`SELECT created_at, source_id, message_id, thread_id, feedback_type, payload_json
+            return db.prepare(`SELECT id, created_at, source_id, message_id, thread_id, feedback_type, payload_json
          FROM feedback_events
          ORDER BY created_at DESC
+         LIMIT ?`).all?.(limit).map((row) => normalizeFeedbackRow(row)) ?? [];
+        },
+        listFeedbackForMessage(sourceId, messageId, limit = 100) {
+            return db.prepare(`SELECT id, created_at, source_id, message_id, thread_id, feedback_type, payload_json
+         FROM feedback_events
+         WHERE source_id = ? AND message_id = ?
+         ORDER BY created_at DESC
+         LIMIT ?`).all?.(sourceId, messageId, limit).map((row) => normalizeFeedbackRow(row)) ?? [];
+        },
+        listRoutingPreferences(sourceId) {
+            const rows = sourceId
+                ? db.prepare(`SELECT payload_json
+           FROM feedback_events
+           WHERE source_id = ? AND feedback_type IN ('mute_sender', 'always_aggregate')
+           ORDER BY created_at DESC`).all?.(sourceId) ?? []
+                : db.prepare(`SELECT payload_json
+           FROM feedback_events
+           WHERE feedback_type IN ('mute_sender', 'always_aggregate')
+           ORDER BY created_at DESC`).all?.() ?? [];
+            const preferences = new Map();
+            for (const row of rows) {
+                const payload = parseJson(row.payload_json);
+                if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+                    continue;
+                }
+                const raw = payload;
+                const prefSourceId = typeof raw.sourceId === "string" ? raw.sourceId : undefined;
+                const sender = typeof raw.sender === "string" ? raw.sender.toLowerCase() : undefined;
+                const feedbackType = raw.feedbackType;
+                if (!prefSourceId || !sender || (feedbackType !== "mute_sender" && feedbackType !== "always_aggregate")) {
+                    continue;
+                }
+                const type = feedbackType === "mute_sender" ? "mute_sender" : "always_aggregate_sender";
+                const key = `${prefSourceId}:${sender}`;
+                if (preferences.has(key)) {
+                    continue;
+                }
+                const preference = {
+                    type,
+                    sourceId: prefSourceId,
+                    sender,
+                    createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString(),
+                };
+                if (typeof raw.actor === "string") {
+                    preference.actor = raw.actor;
+                }
+                if (typeof raw.reason === "string") {
+                    preference.reason = raw.reason;
+                }
+                preferences.set(key, preference);
+            }
+            return [...preferences.values()];
+        },
+        listQuarantine(limit = 25) {
+            const rows = db.prepare(`SELECT id, processed_at, source_id, account_email, message_id, thread_id,
+          security_json, routing_json, actions_json, dry_run
+         FROM decisions
+         WHERE routing_json IS NULL
+         ORDER BY id DESC
          LIMIT ?`).all?.(limit) ?? [];
+            return rows.map((row) => normalizeDecisionRow(row));
         },
         listEvents(sourceId, messageId, limit = 25) {
             return db.prepare(`SELECT id, source_id, account_email, message_id, thread_id, event_type, observed_at
@@ -440,6 +500,18 @@ function normalizeDecisionRow(row) {
         routing: parseJson(row.routing_json),
         actions: parseJson(row.actions_json),
         dryRun: Boolean(row.dry_run),
+    };
+}
+function normalizeFeedbackRow(row) {
+    const payload = parseJson(row.payload_json);
+    return {
+        id: row.id,
+        createdAt: row.created_at,
+        sourceId: row.source_id,
+        messageId: row.message_id,
+        threadId: row.thread_id,
+        feedbackType: row.feedback_type,
+        payload,
     };
 }
 function parseJson(value) {

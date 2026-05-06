@@ -1,5 +1,5 @@
 import type { ActionExecutionStatus } from "./actions.js";
-import type { AggregateItem, DecisionLogEntry, IntakeEvent } from "./types.js";
+import type { AggregateItem, DecisionLogEntry, IntakeEvent, RoutingPreference } from "./types.js";
 export type FirewallState = {
     processed: Record<string, string>;
     decisions: DecisionLogEntry[];
@@ -27,6 +27,9 @@ export type SqliteStateStore = {
     recordEvent(event: IntakeEvent): void;
     recordFeedback(event: Record<string, unknown>): void;
     listFeedbackEvents(limit?: number): Array<Record<string, unknown>>;
+    listFeedbackForMessage(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
+    listRoutingPreferences(sourceId?: string): RoutingPreference[];
+    listQuarantine(limit?: number): Array<Record<string, unknown>>;
     listEvents(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
     findLatestEvent(sourceId: string, messageId: string): IntakeEvent | undefined;
     listDecisions(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;

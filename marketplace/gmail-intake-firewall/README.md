@@ -50,7 +50,7 @@ V1 is intentionally boring and reliable:
 - Suspicious alerts are Slack plus local durable log in v1; webhook and OpenClaw-channel sinks remain action-layer extension points.
 - `wake_now` targets a named wake policy resolving to agent/workspace/session data and uses detached agent wake semantics, not Slack as orchestration.
 - SQLite stores idempotency, decisions, aggregate queues, replay/event inputs, and per-source cursor state.
-- Service methods support config validation, status/probe, bounded backfill, Gmail Pub/Sub HTTP notification handoff, message inspection, replay from stored intake events, aggregate draining, and feedback event recording.
+- Service methods support config validation, status/probe, bounded backfill, Gmail Pub/Sub HTTP notification handoff, message inspection, replay from stored intake events, aggregate draining, and text-based quarantine review/feedback.
 
 ## Privacy And Safety Invariants
 
@@ -81,7 +81,8 @@ Recommended dry-run rollout:
 4. Start the service and call `validateConfig()` and `status()`.
 5. Run bounded `backfill({ sourceId, query, maxResults, dryRun: true })`.
 6. Use `inspectMessage({ sourceId, messageId })` to review events, decisions, and action attempts.
-7. Enable selected Gmail/Slack/wake actions only after dry-run decisions look correct.
+7. Use `gmail_intake_firewall_review` for text-based quarantine review when an agent needs to list quarantined items, present safe metadata to a human, record feedback, wake a target, or add sender preferences.
+8. Enable selected Gmail/Slack/wake actions only after dry-run decisions look correct.
 
 Service methods:
 
@@ -93,6 +94,14 @@ Service methods:
 - `inspectMessage({ sourceId, messageId })` returns stored intake events, decisions, and append-only action attempts for one message.
 - `replayEvent({ sourceId, messageId, force, dryRun })` reprocesses the latest stored intake event for a message, useful after classifier or policy changes.
 - `drainAggregates()` sends due digest wakes. Daily and weekly cadence checks use `aggregate.timezone`; hourly cadence remains elapsed-time based.
+
+Review tool:
+
+- `gmail_intake_firewall_status` is read-only status/probe/config/auth inspection.
+- `gmail_intake_firewall_review` is the write-capable text review tool. Supported operations: `listQuarantine`, `getQuarantineItem`, `recordFeedback`, `markHarmful`, `wakeNow`, `muteSender`, and `alwaysAggregate`.
+- Review payloads are safe by default: metadata, auth headers, link domains, attachment metadata, risk reasons, sanitized summary, action history, and feedback history. They do not include full raw body, raw HTML, or attachment contents.
+- `muteSender` and `alwaysAggregate` create sender preferences that affect future safe routing only. They do not override the security classifier or release risky mail from quarantine.
+- `wakeNow` creates a sanitized detached wake from the reviewed decision. It does not include raw suspicious body or attachments.
 
 Example policy skeleton:
 

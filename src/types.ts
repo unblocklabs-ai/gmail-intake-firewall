@@ -91,6 +91,15 @@ export type PluginConfig = {
   };
 };
 
+export type RoutingPreference = {
+  type: "mute_sender" | "always_aggregate_sender";
+  sourceId: string;
+  sender: string;
+  createdAt: string;
+  actor?: string;
+  reason?: string;
+};
+
 export type AttachmentMetadata = {
   id?: string;
   filename?: string;

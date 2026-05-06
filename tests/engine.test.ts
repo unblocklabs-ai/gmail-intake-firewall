@@ -216,6 +216,68 @@ test("irrelevant safe email records state without wake", async () => {
   assert.deepEqual(result.decision?.actions, [{ type: "record_only", reason: "safe_message_no_wake" }]);
 });
 
+test("mute sender preference changes future safe routing to none", async () => {
+  const result = await processMessage(baseMessage, config(), createEmptyState(), {
+    routingPreferences: [{
+      type: "mute_sender",
+      sourceId: "primary",
+      sender: "client@example.com",
+      createdAt: "2026-05-06T12:00:00.000Z",
+    }],
+    securityClassifier: security({
+      verdict: "safe",
+      riskScore: 0.01,
+      categories: [],
+      reasons: ["safe"],
+      safeSummary: "Safe.",
+      suspiciousSignals: [],
+    }),
+    routerClassifier: router({
+      tags: ["client-dev"],
+      wakeMode: "wake_now",
+      wakeTarget: "agent:dev",
+      sanitizedSummary: "Would wake.",
+      reasons: ["router"],
+    }),
+  });
+
+  assert.equal(result.decision?.routing?.wakeMode, "none");
+  assert.deepEqual(result.decision?.actions, [{ type: "record_only", reason: "safe_message_no_wake" }]);
+});
+
+test("sender preference does not bypass risky quarantine", async () => {
+  const result = await processMessage(baseMessage, config(), createEmptyState(), {
+    routingPreferences: [{
+      type: "mute_sender",
+      sourceId: "primary",
+      sender: "client@example.com",
+      createdAt: "2026-05-06T12:00:00.000Z",
+    }],
+    securityClassifier: security({
+      verdict: "risky",
+      riskScore: 0.98,
+      categories: ["phishing"],
+      reasons: ["credential theft"],
+      safeSummary: "Risky.",
+      suspiciousSignals: ["fake login"],
+    }),
+    routerClassifier: router({
+      tags: ["client-dev"],
+      wakeMode: "wake_now",
+      sanitizedSummary: "Should not route.",
+      reasons: [],
+    }),
+  });
+
+  assert.equal(result.decision?.routing, undefined);
+  assert.deepEqual(result.decision?.actions.map((action) => action.type), [
+    "gmail_label",
+    "gmail_archive",
+    "local_log",
+    "human_alert",
+  ]);
+});
+
 test("aggregate email is queued and can be included in a digest wake", async () => {
   const result = await processMessage(baseMessage, config(), createEmptyState(), {
     securityClassifier: security({
@@ -590,5 +652,6 @@ test("sqlite state stores feedback events", async (t) => {
     selectedTag: "newsletter",
   });
 
-  assert.equal(store.listFeedbackEvents()[0]?.feedback_type, "wrong_tag");
+  assert.equal(store.listFeedbackEvents()[0]?.feedbackType, "wrong_tag");
+  assert.equal((store.listFeedbackEvents()[0]?.payload as Record<string, unknown> | undefined)?.selectedTag, "newsletter");
 });
