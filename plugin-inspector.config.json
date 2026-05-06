@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "plugin": {
+    "id": "gmail-intake-firewall",
+    "priority": "high",
+    "seams": [
+      "plugin-runtime"
+    ],
+    "sourceRoot": "src",
+    "expect": {
+      "registrations": [
+        "registerService"
+      ]
+    }
+  },
+  "capture": {
+    "mockSdk": true
+  }
+}

@@ -1,0 +1,364 @@
+{
+  "id": "gmail-intake-firewall",
+  "name": "Gmail Intake Firewall",
+  "version": "0.1.0",
+  "description": "Classifies Gmail intake before agent exposure, quarantines risky mail, and routes safe mail by explicit policy.",
+  "enabledByDefault": false,
+  "kind": [
+    "service"
+  ],
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": [
+      "service"
+    ]
+  },
+  "uiHints": {
+    "enabled": {
+      "label": "Enabled",
+      "help": "Enable Gmail intake monitoring."
+    },
+    "dryRun": {
+      "label": "Dry Run",
+      "help": "Record intended Gmail, Slack, and wake actions without executing them."
+    },
+    "statePath": {
+      "label": "State Path",
+      "help": "Deprecated JSON fallback path. Use SQLite Path."
+    },
+    "sqlitePath": {
+      "label": "SQLite Path",
+      "help": "Durable SQLite database for decisions, idempotency, aggregate queues, replay, and per-source state."
+    },
+    "openaiApiKeyRef": {
+      "label": "OpenAI API Key Secret",
+      "help": "OpenClaw SecretRef for OPENAI_API_KEY."
+    },
+    "OPENAI_API_KEY": {
+      "label": "OpenAI API Key",
+      "help": "Fallback config-level OpenAI API key. Prefer openaiApiKeyRef when available.",
+      "secret": true,
+      "advanced": true
+    },
+    "openai_model": {
+      "label": "OpenAI Model",
+      "help": "OpenAI model used by the standalone security classifier."
+    },
+    "security.quarantineLabel": {
+      "label": "Quarantine Label"
+    },
+    "security.archiveOnQuarantine": {
+      "label": "Archive On Quarantine"
+    },
+    "security.model": {
+      "label": "Security Model",
+      "help": "Optional model override. When unset, the install default LLM provider/model is used."
+    },
+    "security.alertTarget": {
+      "label": "Alert Target",
+      "advanced": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      },
+      "dryRun": {
+        "type": "boolean",
+        "default": true
+      },
+      "statePath": {
+        "type": "string",
+        "default": "~/.openclaw/gmail-intake-firewall/state.json"
+      },
+      "sqlitePath": {
+        "type": "string",
+        "default": "~/.openclaw/gmail-intake-firewall/state.sqlite"
+      },
+      "openaiApiKeyRef": {
+        "type": "object",
+        "description": "OpenClaw SecretRef resolving to OPENAI_API_KEY or an object containing OPENAI_API_KEY/apiKey."
+      },
+      "OPENAI_API_KEY": {
+        "type": "string",
+        "description": "Fallback config-level OpenAI API key. Prefer openaiApiKeyRef."
+      },
+      "openai_model": {
+        "type": "string",
+        "default": "gpt-5.5"
+      },
+      "sources": {
+        "type": "array",
+        "default": [],
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "accountEmail": {
+              "type": "string"
+            },
+            "authRef": {
+              "type": "object"
+            },
+            "credentialRef": {
+              "type": "object"
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "candidateQuery": {
+              "type": "string"
+            },
+            "include": {
+              "type": "string"
+            },
+            "exclude": {
+              "type": "string"
+            },
+            "defaultRoutingPolicy": {
+              "type": "string"
+            },
+            "intakeMode": {
+              "type": "string",
+              "enum": [
+                "watch",
+                "history",
+                "poll"
+              ],
+              "default": "poll"
+            },
+            "watchTopicName": {
+              "type": "string",
+              "description": "Gmail Pub/Sub topic name for watch mode."
+            },
+            "historyLookback": {
+              "type": "string",
+              "description": "Reserved repair/backfill lookback hint for history mode."
+            },
+            "polling": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "intervalMs": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 60000
+                },
+                "maxResults": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 25
+                }
+              },
+              "default": {}
+            },
+            "gmailActions": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "applyLabels": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "archive": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "hasModifyScope": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Set false when auth only has Gmail read scope; plugin will classify, alert, and log without label/archive."
+                }
+              },
+              "default": {}
+            }
+          },
+          "required": [
+            "id",
+            "accountEmail"
+          ]
+        }
+      },
+      "security": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "quarantineLabel": {
+            "type": "string",
+            "default": "OpenClaw/Quarantine"
+          },
+          "provider": {
+            "type": "string",
+            "description": "Optional LLM provider override. Defaults to the install's configured LLM provider."
+          },
+          "model": {
+            "type": "string",
+            "description": "Optional LLM model override. Defaults to the install's configured model."
+          },
+          "maxBodyChars": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 24000
+          },
+          "maliciousThreshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.65
+          },
+          "uncertainThreshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.35
+          },
+          "failClosedOnUncertain": {
+            "type": "boolean",
+            "default": true,
+            "description": "When true, uncertain security classifications quarantine regardless of numeric risk score."
+          },
+          "alertTarget": {
+            "type": "string"
+          },
+          "archiveOnQuarantine": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "default": {}
+      },
+      "tags": {
+        "type": "array",
+        "default": [],
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "gmailLabel": {
+              "type": "string"
+            },
+            "wakeMode": {
+              "type": "string",
+              "enum": [
+                "none",
+                "wake_now",
+                "aggregate"
+              ]
+            },
+            "aggregateCadence": {
+              "type": "string"
+            },
+            "wakeTarget": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "description",
+            "wakeMode"
+          ]
+        }
+      },
+      "wakeTargets": {
+        "type": "array",
+        "default": [],
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "agentId": {
+              "type": "string"
+            },
+            "workspaceDir": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "deliveryContext": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "id",
+            "agentId"
+          ]
+        }
+      },
+      "alertSinks": {
+        "type": "array",
+        "default": [
+          {
+            "id": "local",
+            "kind": "local_log",
+            "enabled": true
+          }
+        ],
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "slack",
+                "local_log"
+              ]
+            },
+            "target": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "required": [
+            "id",
+            "kind"
+          ]
+        }
+      },
+      "aggregate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "maxDigestItems": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 50
+          },
+          "timezone": {
+            "type": "string",
+            "default": "UTC"
+          }
+        },
+        "default": {}
+      }
+    }
+  }
+}

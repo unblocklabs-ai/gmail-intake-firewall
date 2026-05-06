@@ -1,0 +1,13 @@
+{
+  "name": "gmail-intake-firewall",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin that classifies Gmail intake before agent exposure, quarantines risky mail, and routes safe mail by policy.",
+  "plugins": [
+    {
+      "name": "gmail-intake-firewall",
+      "version": "0.1.0",
+      "source": "marketplace/gmail-intake-firewall",
+      "description": "Gmail intake firewall/router for OpenClaw."
+    }
+  ]
+}

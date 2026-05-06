@@ -1,0 +1,1 @@
+{"version":3,"file":"wake.d.ts","sourceRoot":"","sources":["../../src/wake.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,gBAAgB,EAAE,MAAM,YAAY,CAAC;AAEnD,MAAM,MAAM,wBAAwB,GAAG;IACrC,sBAAsB,CAAC,OAAO,EAAE,gBAAgB,GAAG,OAAO,CAAC,IAAI,CAAC,CAAC;CAClE,CAAC;AAEF,wBAAgB,8BAA8B,CAAC,GAAG,EAAE,OAAO,GAAG,wBAAwB,CAiCrF"}

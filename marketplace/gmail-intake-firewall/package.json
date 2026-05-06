@@ -1,0 +1,69 @@
+{
+  "name": "@unblocklabs/gmail-intake-firewall",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin that classifies Gmail intake before agent exposure, quarantines risky mail, and routes safe mail by policy.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unblocklabs-ai/gmail-intake-firewall.git"
+  },
+  "homepage": "https://github.com/unblocklabs-ai/gmail-intake-firewall",
+  "bugs": {
+    "url": "https://github.com/unblocklabs-ai/gmail-intake-firewall/issues"
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "gmail",
+    "email",
+    "security",
+    "router"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@slack/web-api": "^7.15.0",
+    "googleapis": "^166.0.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": ">=11.0.0"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.3"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.5.3",
+      "minGatewayVersion": "2026.5.3"
+    },
+    "build": {
+      "openclawVersion": "2026.5.3",
+      "pluginSdkVersion": "2026.5.3"
+    },
+    "install": {
+      "npmSpec": "@unblocklabs/gmail-intake-firewall",
+      "defaultChoice": "npm",
+      "minHostVersion": ">=2026.5.3"
+    },
+    "release": {
+      "publishToClawHub": false,
+      "publishToNpm": true
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "openclaw.plugin.json"
+  ]
+}

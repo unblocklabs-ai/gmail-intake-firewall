@@ -1,0 +1,10 @@
+node_modules/
+dist/
+!marketplace/
+!marketplace/**/
+!marketplace/**/dist/
+!marketplace/**/dist/**
+coverage/
+*.log
+.DS_Store
+reports/
