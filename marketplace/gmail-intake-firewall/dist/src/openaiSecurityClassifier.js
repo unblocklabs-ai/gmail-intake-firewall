@@ -79,7 +79,7 @@ function buildRequest(model, message) {
                     type: "object",
                     additionalProperties: false,
                     properties: {
-                        verdict: { type: "string", enum: ["safe", "uncertain", "risky"] },
+                        verdict: { type: "string", enum: ["safe", "uncertain", "risky", "malicious"] },
                         riskScore: { type: "number", minimum: 0, maximum: 1 },
                         categories: { type: "array", items: { type: "string" } },
                         reasons: { type: "array", items: { type: "string" } },
@@ -115,7 +115,7 @@ function parseOutputJson(response) {
 }
 function normalizeClassification(value) {
     const raw = value && typeof value === "object" ? value : {};
-    const verdict = raw.verdict === "safe" || raw.verdict === "risky" || raw.verdict === "uncertain"
+    const verdict = raw.verdict === "safe" || raw.verdict === "risky" || raw.verdict === "uncertain" || raw.verdict === "malicious"
         ? raw.verdict
         : "uncertain";
     return {

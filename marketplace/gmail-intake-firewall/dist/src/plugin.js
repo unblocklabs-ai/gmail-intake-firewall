@@ -10,7 +10,7 @@ import { createUnavailableSecurityClassifier } from "./securityClassifier.js";
 import { openSqliteStateStore } from "./state.js";
 export function registerGmailIntakeFirewallPlugin(api) {
     const host = api && typeof api === "object" ? api : {};
-    const rawConfig = "config" in host ? host.config : undefined;
+    const rawConfig = "pluginConfig" in host ? host.pluginConfig : "config" in host ? host.config : undefined;
     const config = resolvePluginConfig(rawConfig);
     const logger = host.logger && typeof host.logger === "object"
         ? host.logger
@@ -20,11 +20,51 @@ export function registerGmailIntakeFirewallPlugin(api) {
         dryRun: config.dryRun,
         sources: config.sources.length,
     });
+    const service = buildGmailIntakeFirewallService(config, api, logger);
     if (hasRegisterService(api)) {
-        api.registerService(buildGmailIntakeFirewallService(config, api, logger));
+        api.registerService(service);
+    }
+    if (hasRegisterTool(api)) {
+        api.registerTool(buildOperatorStatusTool(service));
     }
     void createUnavailableSecurityClassifier();
     void createNoopRouterClassifier();
+}
+function buildOperatorStatusTool(service) {
+    const schema = {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+            operation: {
+                type: "string",
+                enum: ["status", "probe", "validateConfig"],
+                default: "status",
+            },
+        },
+    };
+    const run = async (input) => {
+        const operation = input && typeof input === "object" && "operation" in input
+            ? input.operation
+            : "status";
+        if (operation === "probe") {
+            return service.probe();
+        }
+        if (operation === "validateConfig") {
+            return service.validateConfig();
+        }
+        return service.status();
+    };
+    return {
+        id: "gmail_intake_firewall_status",
+        name: "gmail_intake_firewall_status",
+        description: "Read-only operator status, probe, and config validation for the Gmail intake firewall plugin.",
+        inputSchema: schema,
+        schema,
+        parameters: schema,
+        handler: run,
+        run,
+        execute: run,
+    };
 }
 function buildGmailIntakeFirewallService(config, host, logger) {
     let runtime;
@@ -219,6 +259,9 @@ function buildGmailIntakeFirewallService(config, host, logger) {
 }
 function hasRegisterService(api) {
     return Boolean(api && typeof api === "object" && typeof api.registerService === "function");
+}
+function hasRegisterTool(api) {
+    return Boolean(api && typeof api === "object" && typeof api.registerTool === "function");
 }
 async function validateRuntimeReadiness(config, secretResolver, openaiApiKey) {
     const findings = [];

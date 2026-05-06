@@ -1,6 +1,6 @@
 import { extractLinksFromGmailContent, normalizeLinks, sanitizeGmailBody } from "./gmailSanitize.js";
 export function shouldQuarantine(classification, security) {
-    if (classification.verdict === "risky") {
+    if (classification.verdict === "risky" || classification.verdict === "malicious") {
         return classification.riskScore >= security.maliciousThreshold;
     }
     if (classification.verdict === "uncertain") {
