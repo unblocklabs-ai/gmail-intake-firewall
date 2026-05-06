@@ -44,6 +44,7 @@ export declare class GmailIntakePollingRuntime {
     private readonly deps;
     private readonly timers;
     private readonly inFlightSources;
+    private readonly pollDiagnostics;
     private running;
     constructor(config: PluginConfig, deps: PollingRuntimeDeps);
     start(): PollingRunSummary;

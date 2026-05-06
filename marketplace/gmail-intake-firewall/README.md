@@ -86,7 +86,7 @@ Recommended dry-run rollout:
 Service methods:
 
 - `validateConfig()` returns actionable config errors/warnings for duplicate ids, missing wake targets, invalid aggregate cadences, invalid timezones, watch mode without a topic, and likely Gmail scope mismatches.
-- `status()` reports configured sources, per-source cursor/state, pending aggregate count, processed counts, quarantine counts, failed action attempts, and aggregate timezone.
+- `status()` reports configured sources, per-source cursor/state, last poll status/error stage, pending aggregate count, processed counts, quarantine counts, failed action attempts, and aggregate timezone.
 - `backfill(options)` runs bounded replay from Gmail candidates. Through the plugin service, `query` or `maxResults` is required unless `allowUnbounded: true` is explicit.
 - `inspectMessage({ sourceId, messageId })` returns stored intake events, decisions, and append-only action attempts for one message.
 - `replayEvent({ sourceId, messageId, force, dryRun })` reprocesses the latest stored intake event for a message, useful after classifier or policy changes.
@@ -203,6 +203,7 @@ The next phase should build the real end-to-end v1 around the scaffold. Phase 1 
    - Add example config docs for common deployments.
 
 9. Remaining after Phase 2 foundation.
+   - Done: add operator-grade poll diagnostics for gateway/service startup paths, including redacted stage-specific errors in logs and status output.
    - Wire actual Pub/Sub push delivery from host infrastructure into Gmail history processing.
    - Add full install examples for Gmail OAuth and Pub/Sub setup.
    - Expand Slack feedback buttons from recorded feedback events into rule/example updates.

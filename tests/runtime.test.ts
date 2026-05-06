@@ -771,6 +771,124 @@ test("runtime status and inspect expose safe operator state", async (t) => {
   assert.equal(inspection.actionAttempts?.length, 1);
 });
 
+test("runtime status exposes redacted last poll failure stage", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+  });
+  const errors: Array<{ message: string; metadata?: Record<string, unknown> }> = [];
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => {
+      throw Object.assign(new Error("OAuth failed refresh_token=secret-token Bearer abc123"), { code: 401 });
+    },
+    logger: {
+      error(message, metadata) {
+        errors.push({ message, ...(metadata ? { metadata } : {}) });
+      },
+    },
+    now: () => new Date("2026-05-06T12:00:00.000Z"),
+  });
+
+  const summary = await runtime.runOnce();
+  const status = runtime.status() as { sources?: Array<{ lastPoll?: Record<string, unknown> }> };
+  const lastPoll = status.sources?.[0]?.lastPoll as { error?: { message?: string }; stage?: string; status?: string } | undefined;
+
+  assert.equal(summary.errors, 1);
+  assert.equal(lastPoll?.status, "failed");
+  assert.equal(lastPoll?.stage, "client_create");
+  assert.equal(lastPoll?.error?.message, "OAuth failed refresh_token= [redacted] Bearer [redacted]");
+  assert.equal(errors[0]?.metadata?.stage, "client_create");
+  assert.equal(errors[0]?.metadata?.error, "OAuth failed refresh_token= [redacted] Bearer [redacted]");
+});
+
+test("runtime diagnostics redact JSON-shaped secrets in backfill and replay logs", async (t) => {
+  const stateStore = await tempStore(t);
+  stateStore.recordEvent({
+    sourceId: "primary",
+    accountEmail: "user@example.com",
+    messageId: "msg-1",
+    threadId: "thread-msg-1",
+    eventType: "poll_candidate",
+    observedAt: "2026-05-06T12:00:00.000Z",
+  });
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+  });
+  const errors: Array<{ message: string; metadata?: Record<string, unknown> }> = [];
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => {
+      throw Object.assign(
+        new Error('OAuth failed {"refresh_token":"secret-token","client_secret": "client-secret","api_key":"openai-secret","Authorization":"Bearer abc123"}'),
+        { response: { status: 401 } },
+      );
+    },
+    logger: {
+      error(message, metadata) {
+        errors.push({ message, ...(metadata ? { metadata } : {}) });
+      },
+    },
+  });
+
+  await runtime.runBackfill({ sourceId: "primary", maxResults: 1 });
+  await runtime.replayEvent({ sourceId: "primary", messageId: "msg-1", force: true });
+
+  assert.equal(errors.length, 2);
+  for (const entry of errors) {
+    assert.equal(typeof entry.metadata?.error, "string");
+    assert.match(String(entry.metadata?.error), /"refresh_token": "\[redacted\]"/);
+    assert.match(String(entry.metadata?.error), /"client_secret": "\[redacted\]"/);
+    assert.match(String(entry.metadata?.error), /"api_key": "\[redacted\]"/);
+    assert.match(String(entry.metadata?.error), /"Authorization": "\[redacted\]"/);
+    assert.equal(String(entry.metadata?.error).includes("secret-token"), false);
+    assert.equal(String(entry.metadata?.error).includes("client-secret"), false);
+    assert.equal(String(entry.metadata?.error).includes("openai-secret"), false);
+    assert.equal(entry.metadata?.status, 401);
+  }
+});
+
+test("runtime status records completed polls that had message processing errors", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        return [{ id: "msg-1", threadId: "thread-msg-1" }];
+      },
+      async fetchMessage() {
+        throw new Error("Gmail fetch failed");
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    now: () => new Date("2026-05-06T12:00:00.000Z"),
+  });
+
+  const summary = await runtime.runOnce();
+  const status = runtime.status() as { sources?: Array<{ lastPoll?: Record<string, unknown> }> };
+
+  assert.equal(summary.errors, 1);
+  assert.equal(status.sources?.[0]?.lastPoll?.status, "completed_with_errors");
+  assert.equal(status.sources?.[0]?.lastPoll?.eventCount, 1);
+  assert.equal(status.sources?.[0]?.lastPoll?.errors, 1);
+  assert.equal(status.sources?.[0]?.lastPoll?.stage, "message_fetch");
+  assert.deepEqual((status.sources?.[0]?.lastPoll as { error?: Record<string, unknown> } | undefined)?.error, {
+    name: "Error",
+    message: "Gmail fetch failed",
+  });
+  assert.equal(status.sources?.[0]?.lastPoll?.finishedAt, "2026-05-06T12:00:00.000Z");
+});
+
 test("runtime status reflects credential scope modify limits from cursor", async (t) => {
   const stateStore = await tempStore(t);
   stateStore.setSourceCursor("primary", {

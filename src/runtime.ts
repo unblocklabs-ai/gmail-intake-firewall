@@ -51,10 +51,45 @@ export type ReplayOptions = {
 };
 
 type TimerHandle = ReturnType<typeof setInterval>;
+type PollStage =
+  | "client_create"
+  | "candidate_list"
+  | "event_record"
+  | "message_fetch"
+  | "thread_context"
+  | "classification"
+  | "action_execute"
+  | "cursor_update";
+
+type SourcePollDiagnostic = {
+  status: "running" | "succeeded" | "completed_with_errors" | "failed" | "skipped";
+  startedAt?: string;
+  finishedAt?: string;
+  stage?: PollStage;
+  eventCount?: number;
+  fetched?: number;
+  processed?: number;
+  skipped?: number;
+  errors?: number;
+  error?: {
+    name?: string;
+    message: string;
+    code?: string | number;
+    status?: string | number;
+  };
+};
+type SafeRuntimeError = NonNullable<SourcePollDiagnostic["error"]>;
+type ProcessEventResult = Pick<PollingRunSummary, "fetched" | "processed" | "skipped" | "errors"> & {
+  diagnostic?: {
+    stage: PollStage;
+    error: SafeRuntimeError;
+  };
+};
 
 export class GmailIntakePollingRuntime {
   private readonly timers = new Map<string, TimerHandle>();
   private readonly inFlightSources = new Set<string>();
+  private readonly pollDiagnostics = new Map<string, SourcePollDiagnostic>();
   private running = false;
 
   constructor(
@@ -119,9 +154,12 @@ export class GmailIntakePollingRuntime {
       candidates = await client.listCandidates(options.query ?? buildCandidateQuery(source));
     } catch (error) {
       summary.errors += 1;
+      const safeError = safeRuntimeError(error);
       this.deps.logger?.error?.("gmail-intake-firewall backfill list failed", {
         sourceId: source.id,
-        error: error instanceof Error ? error.message : String(error),
+        error: safeError.message,
+        ...(safeError.code !== undefined ? { code: safeError.code } : {}),
+        ...(safeError.status !== undefined ? { status: safeError.status } : {}),
       });
       return summary;
     }
@@ -214,6 +252,7 @@ export class GmailIntakePollingRuntime {
           archive: source.gmailActions.archive,
           hasModifyScope: source.gmailActions.hasModifyScope,
         },
+        lastPoll: this.pollDiagnostics.get(source.id),
         readiness: buildSourceReadiness(source, cursor, this.now()),
         cursor,
         stats: this.deps.stateStore.getSourceStats(source.id),
@@ -264,10 +303,13 @@ export class GmailIntakePollingRuntime {
       summary.sources = 1;
       summary.events = 1;
       summary.errors += 1;
+      const safeError = safeRuntimeError(error);
       this.deps.logger?.error?.("gmail-intake-firewall replay client creation failed", {
         sourceId: source.id,
         messageId: options.messageId,
-        error: error instanceof Error ? error.message : String(error),
+        error: safeError.message,
+        ...(safeError.code !== undefined ? { code: safeError.code } : {}),
+        ...(safeError.status !== undefined ? { status: safeError.status } : {}),
       });
       return summary;
     }
@@ -292,6 +334,13 @@ export class GmailIntakePollingRuntime {
     summary.sources = 1;
     if (this.inFlightSources.has(source.id)) {
       summary.skipped += 1;
+      this.pollDiagnostics.set(source.id, {
+        status: "skipped",
+        finishedAt: this.now().toISOString(),
+        stage: "candidate_list",
+        skipped: 1,
+        errors: 0,
+      });
       this.deps.logger?.warn?.("gmail-intake-firewall poll skipped because source is already running", {
         sourceId: source.id,
       });
@@ -299,8 +348,13 @@ export class GmailIntakePollingRuntime {
     }
     this.inFlightSources.add(source.id);
     const observedAt = this.now();
+    const startedAt = observedAt.toISOString();
+    let stage: PollStage = "client_create";
+    this.pollDiagnostics.set(source.id, { status: "running", startedAt, stage });
     try {
       const client = await this.deps.gmailClientFactory(source);
+      stage = "candidate_list";
+      this.pollDiagnostics.set(source.id, { status: "running", startedAt, stage });
       const candidates = await this.listSourceCandidates(source, client);
       const limitedCandidates = candidates.slice(0, source.polling.maxResults);
       const eventType: IntakeEvent["eventType"] = source.intakeMode === "history" || source.intakeMode === "watch" ? "gmail_history" : "poll_candidate";
@@ -309,14 +363,20 @@ export class GmailIntakePollingRuntime {
         eventType,
       }));
       summary.events = events.length;
+      let lastEventDiagnostic: ProcessEventResult["diagnostic"];
       for (const event of events) {
+        stage = "event_record";
         this.deps.stateStore.recordEvent(event);
         const result = await this.processEvent(client, event);
+        if (result.diagnostic) {
+          lastEventDiagnostic = result.diagnostic;
+        }
         summary.fetched += result.fetched;
         summary.processed += result.processed;
         summary.skipped += result.skipped;
         summary.errors += result.errors;
       }
+      stage = "cursor_update";
       const existingCursor = this.deps.stateStore.getSourceCursor(source.id) ?? {};
       this.deps.stateStore.setSourceCursor(source.id, {
         ...existingCursor,
@@ -324,11 +384,42 @@ export class GmailIntakePollingRuntime {
         lastPolledAt: observedAt.toISOString(),
         candidateCount: limitedCandidates.length,
       }, observedAt.toISOString());
+      this.pollDiagnostics.set(source.id, {
+        status: summary.errors > 0 ? "completed_with_errors" : "succeeded",
+        startedAt,
+        finishedAt: this.now().toISOString(),
+        stage,
+        eventCount: summary.events,
+        fetched: summary.fetched,
+        processed: summary.processed,
+        skipped: summary.skipped,
+        errors: summary.errors,
+        ...(lastEventDiagnostic ? {
+          stage: lastEventDiagnostic.stage,
+          error: lastEventDiagnostic.error,
+        } : {}),
+      });
     } catch (error) {
       summary.errors += 1;
+      const safeError = safeRuntimeError(error);
+      this.pollDiagnostics.set(source.id, {
+        status: "failed",
+        startedAt,
+        finishedAt: this.now().toISOString(),
+        stage,
+        eventCount: summary.events,
+        fetched: summary.fetched,
+        processed: summary.processed,
+        skipped: summary.skipped,
+        errors: summary.errors,
+        error: safeError,
+      });
       this.deps.logger?.error?.("gmail-intake-firewall poll source failed", {
         sourceId: source.id,
-        error: error instanceof Error ? error.message : String(error),
+        stage,
+        error: safeError.message,
+        ...(safeError.code !== undefined ? { code: safeError.code } : {}),
+        ...(safeError.status !== undefined ? { status: safeError.status } : {}),
       });
     } finally {
       this.inFlightSources.delete(source.id);
@@ -340,33 +431,39 @@ export class GmailIntakePollingRuntime {
     client: GmailClient,
     event: IntakeEvent,
     options: { force?: boolean; dryRun?: boolean } = {},
-  ): Promise<Pick<PollingRunSummary, "fetched" | "processed" | "skipped" | "errors">> {
-    const summary = { fetched: 0, processed: 0, skipped: 0, errors: 0 };
+  ): Promise<ProcessEventResult> {
+    const summary: ProcessEventResult = { fetched: 0, processed: 0, skipped: 0, errors: 0 };
     if (!options.force && this.deps.stateStore.isProcessed(event.sourceId, event.messageId)) {
       summary.skipped += 1;
       return summary;
     }
+    let stage: PollStage = "message_fetch";
     try {
+      stage = "message_fetch";
       const message = await client.fetchMessage({
         id: event.messageId,
         threadId: event.threadId ?? "",
       });
       if (client.fetchThreadContext && message.threadId) {
         try {
+          stage = "thread_context";
           const threadContext = await client.fetchThreadContext(message.threadId);
           if (threadContext) {
             message.threadContext = threadContext;
           }
         } catch (error) {
+          const safeError = safeRuntimeError(error);
           this.deps.logger?.warn?.("gmail-intake-firewall thread context fetch failed", {
             sourceId: event.sourceId,
             messageId: event.messageId,
             threadId: message.threadId,
-            error: error instanceof Error ? error.message : String(error),
+            stage: "thread_context",
+            error: safeError.message,
           });
         }
       }
       summary.fetched += 1;
+      stage = "classification";
       const processDeps: ProcessMessageDeps = {
         securityClassifier: this.deps.securityClassifier ?? createUnavailableSecurityClassifier(),
         routerClassifier: this.deps.routerClassifier ?? createNoopRouterClassifier(),
@@ -377,6 +474,7 @@ export class GmailIntakePollingRuntime {
       const result = await processMessage(message, this.config, createEmptyState(), processDeps);
       if (result.decision) {
         this.deps.stateStore.recordDecisionPlan(result.decision);
+        stage = "action_execute";
         const actionResults = await executePlannedActions(result.decision.actions, options.dryRun ?? this.config.dryRun, {
           ...(this.deps.actionDeps ?? {}),
           gmail: this.deps.actionDeps?.gmail ?? client,
@@ -395,10 +493,15 @@ export class GmailIntakePollingRuntime {
       }
     } catch (error) {
       summary.errors += 1;
+      const safeError = safeRuntimeError(error);
+      summary.diagnostic = { stage, error: safeError };
       this.deps.logger?.error?.("gmail-intake-firewall process event failed", {
         sourceId: event.sourceId,
         messageId: event.messageId,
-        error: error instanceof Error ? error.message : String(error),
+        stage,
+        error: safeError.message,
+        ...(safeError.code !== undefined ? { code: safeError.code } : {}),
+        ...(safeError.status !== undefined ? { status: safeError.status } : {}),
       });
     }
     return summary;
@@ -607,6 +710,30 @@ function isStaleHistoryError(error: unknown): boolean {
   }
   const message = error instanceof Error ? error.message : String(error);
   return /history/i.test(message) && /(stale|expired|too old|not found|invalid)/i.test(message);
+}
+
+function safeRuntimeError(error: unknown): SafeRuntimeError {
+  if (error instanceof Error) {
+    const raw = error as Error & { code?: unknown; status?: unknown; response?: { status?: unknown } };
+    return {
+      name: error.name,
+      message: redactSecretLikeValues(error.message),
+      ...(typeof raw.code === "string" || typeof raw.code === "number" ? { code: raw.code } : {}),
+      ...(typeof raw.status === "string" || typeof raw.status === "number"
+        ? { status: raw.status }
+        : typeof raw.response?.status === "string" || typeof raw.response?.status === "number"
+          ? { status: raw.response.status }
+          : {}),
+    };
+  }
+  return { message: redactSecretLikeValues(String(error)) };
+}
+
+function redactSecretLikeValues(value: string): string {
+  return value
+    .replace(/(["'])(access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|api[_-]?key|authorization)\1\s*:\s*(["'])[^"']*\3/gi, "$1$2$1: $3[redacted]$3")
+    .replace(/(access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|api[_-]?key|authorization)\s*(=|:)\s*[^,\s)}]+/gi, "$1$2 [redacted]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]");
 }
 
 function groupAggregateItems(items: import("./types.js").AggregateItem[]): Array<{ key: string; wakeTarget?: string; items: import("./types.js").AggregateItem[] }> {
