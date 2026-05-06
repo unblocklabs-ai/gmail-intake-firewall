@@ -207,3 +207,95 @@ export function resolvePluginConfig(rawConfig) {
         },
     };
 }
+export function validatePluginConfig(config) {
+    const findings = [];
+    addDuplicateFindings(findings, "sources", config.sources.map((source) => source.id));
+    addDuplicateFindings(findings, "tags", config.tags.map((tag) => tag.id));
+    addDuplicateFindings(findings, "wakeTargets", config.wakeTargets.map((target) => target.id));
+    addDuplicateFindings(findings, "alertSinks", config.alertSinks.map((sink) => sink.id));
+    const wakeTargetIds = new Set(config.wakeTargets.map((target) => target.id));
+    const alertSinkIds = new Set(config.alertSinks.map((sink) => sink.id));
+    for (const source of config.sources) {
+        if (!source.authRef && !source.credentialRef) {
+            findings.push({
+                severity: "warning",
+                path: `sources.${source.id}.authRef`,
+                message: "Source has no authRef/credentialRef; Gmail access will be unavailable unless the host injects a Gmail client.",
+            });
+        }
+        if (source.intakeMode === "watch" && !source.watchTopicName) {
+            findings.push({
+                severity: "error",
+                path: `sources.${source.id}.watchTopicName`,
+                message: "watch intakeMode requires watchTopicName.",
+            });
+        }
+        if (source.gmailActions.enabled && (source.gmailActions.applyLabels || source.gmailActions.archive) && !source.gmailActions.hasModifyScope) {
+            findings.push({
+                severity: "warning",
+                path: `sources.${source.id}.gmailActions.hasModifyScope`,
+                message: "Gmail write actions are configured but hasModifyScope is false; label/archive actions will degrade to log/alert only.",
+            });
+        }
+    }
+    for (const tag of config.tags) {
+        if (tag.wakeTarget && !wakeTargetIds.has(tag.wakeTarget)) {
+            findings.push({
+                severity: "error",
+                path: `tags.${tag.id}.wakeTarget`,
+                message: `Tag references unknown wakeTarget "${tag.wakeTarget}".`,
+            });
+        }
+        if (tag.wakeMode === "wake_now" && !tag.wakeTarget) {
+            findings.push({
+                severity: "error",
+                path: `tags.${tag.id}.wakeTarget`,
+                message: "wake_now tags require wakeTarget.",
+            });
+        }
+        if (tag.wakeMode === "aggregate" && tag.aggregateCadence && !["hourly", "daily", "weekly"].includes(tag.aggregateCadence)) {
+            findings.push({
+                severity: "error",
+                path: `tags.${tag.id}.aggregateCadence`,
+                message: "aggregateCadence must be hourly, daily, or weekly.",
+            });
+        }
+    }
+    if (config.security.alertTarget && !alertSinkIds.has(config.security.alertTarget) && !config.alertSinks.some((sink) => sink.target === config.security.alertTarget)) {
+        findings.push({
+            severity: "warning",
+            path: "security.alertTarget",
+            message: "alertTarget does not match an alert sink id or target; Slack alerts may have no explicit destination.",
+        });
+    }
+    if (!isValidTimezone(config.aggregate.timezone)) {
+        findings.push({
+            severity: "error",
+            path: "aggregate.timezone",
+            message: `Invalid IANA timezone "${config.aggregate.timezone}".`,
+        });
+    }
+    return findings;
+}
+function addDuplicateFindings(findings, path, values) {
+    const seen = new Set();
+    for (const value of values) {
+        if (seen.has(value)) {
+            findings.push({
+                severity: "error",
+                path,
+                message: `Duplicate id "${value}".`,
+            });
+        }
+        seen.add(value);
+    }
+}
+function isValidTimezone(timezone) {
+    try {
+        new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+        return true;
+    }
+    catch {
+        return false;
+    }
+}

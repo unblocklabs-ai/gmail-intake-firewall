@@ -294,10 +294,12 @@ test("polling runtime stores append-only action attempts across retries", async 
   await runtime.runOnce();
   await runtime.runOnce();
 
-  const statuses = stateStore.listActionStatuses("primary", "msg-1");
-  assert.equal(statuses.length, 4);
-  assert.deepEqual(statuses.map((row) => row.status), ["succeeded", "failed", "succeeded", "failed"]);
-  assert.deepEqual(statuses.map((row) => row.action_index), [0, 1, 0, 1]);
+  const attempts = stateStore.listActionAttempts("primary", "msg-1");
+  const latest = stateStore.listActionStatuses("primary", "msg-1");
+  assert.equal(attempts.length, 4);
+  assert.deepEqual(attempts.map((row) => row.status), ["succeeded", "failed", "succeeded", "failed"]);
+  assert.deepEqual(attempts.map((row) => row.action_index), [0, 1, 0, 1]);
+  assert.deepEqual(latest.map((row) => row.status), ["succeeded", "failed"]);
 });
 
 test("polling runtime marks processed only after required actions succeed", async (t) => {
@@ -683,6 +685,159 @@ test("backfill reports candidate listing errors without throwing", async (t) => 
   assert.equal(summary.sources, 1);
   assert.equal(summary.errors, 1);
   assert.equal(summary.events, 0);
+});
+
+test("runtime status and inspect expose safe operator state", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        return [{ id: "msg-1", threadId: "thread-msg-1" }];
+      },
+      async fetchMessage(candidate) {
+        return message(candidate.id);
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    securityClassifier: { classify: async () => safeSecurity },
+    routerClassifier: {
+      classify: async () => ({
+        tags: [],
+        wakeMode: "none",
+        sanitizedSummary: "Safe runtime message.",
+        reasons: [],
+      }),
+    },
+    now: () => new Date("2026-05-06T12:00:00.000Z"),
+  });
+
+  await runtime.runOnce();
+  const status = runtime.status() as { sources?: Array<{ stats?: Record<string, unknown> }> };
+  const inspection = runtime.inspectMessage("primary", "msg-1") as {
+    processed?: boolean;
+    events?: unknown[];
+    decisions?: unknown[];
+    latestActionStatuses?: unknown[];
+    actionAttempts?: unknown[];
+  };
+
+  assert.equal(status.sources?.[0]?.stats?.processed, 1);
+  assert.equal(inspection.processed, true);
+  assert.equal(inspection.events?.length, 1);
+  assert.equal(inspection.decisions?.length, 1);
+  assert.equal(inspection.latestActionStatuses?.length, 1);
+  assert.equal(inspection.actionAttempts?.length, 1);
+});
+
+test("runtime status counts all pending aggregate rows", async (t) => {
+  const stateStore = await tempStore(t);
+  for (let index = 0; index < 3; index += 1) {
+    stateStore.enqueueAggregate({
+      sourceId: "primary",
+      accountEmail: "user@example.com",
+      messageId: `msg-${index}`,
+      threadId: `thread-${index}`,
+      tags: ["digest"],
+      sanitizedSummary: "Digest item",
+      queuedAt: "2026-05-05T00:00:00.000Z",
+      cadence: "daily",
+    });
+  }
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    aggregate: { maxDigestItems: 1 },
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() { return []; },
+      async fetchMessage() { return message("msg-1"); },
+      async applyLabel() {},
+      async archive() {},
+    }),
+  });
+
+  const status = runtime.status() as { aggregate?: { pending?: number } };
+
+  assert.equal(status.aggregate?.pending, 3);
+});
+
+test("runtime replay reprocesses stored intake event when forced", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+  });
+  let fetchCount = 0;
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        return [{ id: "msg-1", threadId: "thread-msg-1" }];
+      },
+      async fetchMessage(candidate) {
+        fetchCount += 1;
+        return message(candidate.id);
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    securityClassifier: { classify: async () => safeSecurity },
+    routerClassifier: {
+      classify: async () => ({
+        tags: [],
+        wakeMode: "none",
+        sanitizedSummary: "Safe runtime message.",
+        reasons: [],
+      }),
+    },
+  });
+
+  await runtime.runOnce();
+  const skippedReplay = await runtime.replayEvent({ sourceId: "primary", messageId: "msg-1" });
+  const forcedReplay = await runtime.replayEvent({ sourceId: "primary", messageId: "msg-1", force: true });
+
+  assert.equal(skippedReplay.skipped, 1);
+  assert.equal(forcedReplay.processed, 1);
+  assert.equal(fetchCount, 2);
+});
+
+test("runtime replay reports client creation errors without throwing", async (t) => {
+  const stateStore = await tempStore(t);
+  stateStore.recordEvent({
+    sourceId: "primary",
+    accountEmail: "user@example.com",
+    messageId: "msg-1",
+    threadId: "thread-msg-1",
+    eventType: "poll_candidate",
+    observedAt: "2026-05-06T12:00:00.000Z",
+  });
+  const runtime = new GmailIntakePollingRuntime(resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+  }), {
+    stateStore,
+    gmailClientFactory: () => {
+      throw new Error("Gmail credentials missing");
+    },
+  });
+
+  const summary = await runtime.replayEvent({ sourceId: "primary", messageId: "msg-1", force: true });
+
+  assert.equal(summary.sources, 1);
+  assert.equal(summary.events, 1);
+  assert.equal(summary.errors, 1);
 });
 
 test("aggregate drain delivers due digest and marks rows delivered", async (t) => {

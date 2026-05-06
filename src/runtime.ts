@@ -42,6 +42,13 @@ export type BackfillOptions = {
   dryRun?: boolean;
 };
 
+export type ReplayOptions = {
+  sourceId: string;
+  messageId: string;
+  force?: boolean;
+  dryRun?: boolean;
+};
+
 type TimerHandle = ReturnType<typeof setInterval>;
 
 export class GmailIntakePollingRuntime {
@@ -189,6 +196,84 @@ export class GmailIntakePollingRuntime {
       enabledSources: this.enabledSources().length,
       sqlitePath: this.config.sqlitePath,
     };
+  }
+
+  status(): Record<string, unknown> {
+    const sources = this.config.sources.map((source) => ({
+      id: source.id,
+      accountEmail: source.accountEmail,
+      enabled: source.enabled,
+      intakeMode: source.intakeMode ?? "poll",
+      polling: source.polling,
+      cursor: this.deps.stateStore.getSourceCursor(source.id),
+      stats: this.deps.stateStore.getSourceStats(source.id),
+    }));
+    return {
+      running: this.running,
+      enabled: this.config.enabled,
+      dryRun: this.config.dryRun,
+      sqlitePath: this.config.sqlitePath,
+      aggregate: {
+        timezone: this.config.aggregate.timezone,
+        pending: this.deps.stateStore.countPendingAggregates(),
+        maxDigestItems: this.config.aggregate.maxDigestItems,
+      },
+      sources,
+    };
+  }
+
+  inspectMessage(sourceId: string, messageId: string): Record<string, unknown> {
+    return {
+      sourceId,
+      messageId,
+      processed: this.deps.stateStore.isProcessed(sourceId, messageId),
+      events: this.deps.stateStore.listEvents(sourceId, messageId),
+      decisions: this.deps.stateStore.listDecisions(sourceId, messageId),
+      latestActionStatuses: this.deps.stateStore.listActionStatuses(sourceId, messageId),
+      actionAttempts: this.deps.stateStore.listActionAttempts(sourceId, messageId),
+    };
+  }
+
+  async replayEvent(options: ReplayOptions): Promise<PollingRunSummary> {
+    const summary = this.emptySummary();
+    const source = this.config.sources.find((candidate) => candidate.id === options.sourceId);
+    if (!source || !source.enabled || !this.config.enabled) {
+      summary.skipped += 1;
+      return summary;
+    }
+    const event = this.deps.stateStore.findLatestEvent(options.sourceId, options.messageId);
+    if (!event) {
+      summary.skipped += 1;
+      return summary;
+    }
+    let client: GmailClient;
+    try {
+      client = await this.deps.gmailClientFactory(source);
+    } catch (error) {
+      summary.sources = 1;
+      summary.events = 1;
+      summary.errors += 1;
+      this.deps.logger?.error?.("gmail-intake-firewall replay client creation failed", {
+        sourceId: source.id,
+        messageId: options.messageId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return summary;
+    }
+    const result = await this.processEvent(client, {
+      ...event,
+      observedAt: this.now().toISOString(),
+    }, {
+      force: options.force ?? false,
+      ...(typeof options.dryRun === "boolean" ? { dryRun: options.dryRun } : {}),
+    });
+    summary.sources = 1;
+    summary.events = 1;
+    summary.fetched += result.fetched;
+    summary.processed += result.processed;
+    summary.skipped += result.skipped;
+    summary.errors += result.errors;
+    return summary;
   }
 
   private async runSource(source: GmailSourceConfig): Promise<PollingRunSummary> {

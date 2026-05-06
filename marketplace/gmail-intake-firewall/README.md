@@ -50,7 +50,7 @@ V1 is intentionally boring and reliable:
 - Suspicious alerts are Slack plus local durable log in v1; webhook and OpenClaw-channel sinks remain action-layer extension points.
 - `wake_now` targets a named wake policy resolving to agent/workspace/session data and uses detached agent wake semantics, not Slack as orchestration.
 - SQLite stores idempotency, decisions, aggregate queues, replay/event inputs, and per-source cursor state.
-- Service methods support bounded backfill, aggregate draining, and feedback event recording.
+- Service methods support config validation, status/probe, bounded backfill, message inspection, replay from stored intake events, aggregate draining, and feedback event recording.
 
 ## Privacy And Safety Invariants
 
@@ -67,6 +67,79 @@ V1 is intentionally boring and reliable:
 ```sh
 npm install
 npm run preflight
+```
+
+## Operator Workflow
+
+Phase 3 adds the service surfaces needed to run the plugin in a real install without reading SQLite by hand first.
+
+Recommended dry-run rollout:
+
+1. Configure one source with `authRef` or `credentialRef`, `dryRun: true`, a local SQLite path, and conservative Gmail actions.
+2. Configure `openaiApiKeyRef` for `OPENAI_API_KEY`, or use the fallback `OPENAI_API_KEY` config field for local testing.
+3. Add one Slack alert sink, one quarantine label, one wake target, and a small tag policy.
+4. Start the service and call `validateConfig()` and `status()`.
+5. Run bounded `backfill({ sourceId, query, maxResults, dryRun: true })`.
+6. Use `inspectMessage({ sourceId, messageId })` to review events, decisions, and action attempts.
+7. Enable selected Gmail/Slack/wake actions only after dry-run decisions look correct.
+
+Service methods:
+
+- `validateConfig()` returns actionable config errors/warnings for duplicate ids, missing wake targets, invalid aggregate cadences, invalid timezones, watch mode without a topic, and likely Gmail scope mismatches.
+- `status()` reports configured sources, per-source cursor/state, pending aggregate count, processed counts, quarantine counts, failed action attempts, and aggregate timezone.
+- `backfill(options)` runs bounded replay from Gmail candidates. Through the plugin service, `query` or `maxResults` is required unless `allowUnbounded: true` is explicit.
+- `inspectMessage({ sourceId, messageId })` returns stored intake events, decisions, and append-only action attempts for one message.
+- `replayEvent({ sourceId, messageId, force, dryRun })` reprocesses the latest stored intake event for a message, useful after classifier or policy changes.
+- `drainAggregates()` sends due digest wakes. Daily and weekly cadence checks use `aggregate.timezone`; hourly cadence remains elapsed-time based.
+
+Example policy skeleton:
+
+```json
+{
+  "dryRun": true,
+  "openaiApiKeyRef": { "source": "openclaw", "provider": "secrets", "id": "OPENAI_API_KEY" },
+  "openai_model": "gpt-5.5",
+  "sqlitePath": "~/.openclaw/gmail-intake-firewall/state.sqlite",
+  "sources": [
+    {
+      "id": "primary",
+      "accountEmail": "user@example.com",
+      "authRef": { "source": "openclaw", "provider": "secrets", "id": "gmail-primary" },
+      "enabled": true,
+      "candidateQuery": "in:inbox newer_than:7d",
+      "intakeMode": "poll",
+      "polling": { "intervalMs": 60000, "maxResults": 25 },
+      "gmailActions": {
+        "enabled": true,
+        "applyLabels": true,
+        "archive": true,
+        "hasModifyScope": true
+      }
+    }
+  ],
+  "security": {
+    "quarantineLabel": "OpenClaw/Potentially Harmful",
+    "alertTarget": "security",
+    "archiveOnQuarantine": true
+  },
+  "alertSinks": [
+    { "id": "security", "kind": "slack", "target": "slack:#security", "enabled": true }
+  ],
+  "wakeTargets": [
+    { "id": "agent:client-dev", "agentId": "client-dev-agent", "workspaceDir": "/workspace" },
+    { "id": "agent:digest", "agentId": "digest-agent", "workspaceDir": "/workspace" }
+  ],
+  "tags": [
+    { "id": "client-development", "description": "Client development requests", "gmailLabel": "OpenClaw/ClientDev", "wakeMode": "wake_now", "wakeTarget": "agent:client-dev" },
+    { "id": "newsletter", "description": "Newsletters and product updates", "gmailLabel": "OpenClaw/Newsletter", "wakeMode": "aggregate", "aggregateCadence": "daily", "wakeTarget": "agent:digest" },
+    { "id": "receipt", "description": "Receipts and billing notices", "gmailLabel": "OpenClaw/Receipt", "wakeMode": "none" },
+    { "id": "personal", "description": "Personal mail that should not wake agents", "wakeMode": "none" }
+  ],
+  "aggregate": {
+    "maxDigestItems": 50,
+    "timezone": "America/New_York"
+  }
+}
 ```
 
 ## Next Phase

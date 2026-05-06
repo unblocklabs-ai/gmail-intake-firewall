@@ -94,13 +94,20 @@ export function openSqliteStateStore(path) {
           attempted_at = excluded.attempted_at`).run(decision.sourceId, decision.messageId, status.actionIndex, status.action.type, status.required ? 1 : 0, status.status, status.error ?? null, attemptedAt);
         },
         listActionStatuses(sourceId, messageId) {
-            return this.listActionAttempts(sourceId, messageId);
+            return db.prepare(`SELECT action_index, action_type, required, status, error, attempted_at
+         FROM action_statuses
+         WHERE source_id = ? AND message_id = ?
+         ORDER BY action_index ASC`).all?.(sourceId, messageId) ?? [];
         },
         listActionAttempts(sourceId, messageId) {
             return db.prepare(`SELECT id, processed_at, action_index, action_type, required, status, error, attempted_at
          FROM action_attempts
          WHERE source_id = ? AND message_id = ?
          ORDER BY id ASC`).all?.(sourceId, messageId) ?? [];
+        },
+        countPendingAggregates() {
+            const row = db.prepare("SELECT COUNT(*) AS count FROM aggregate_queue WHERE delivered_at IS NULL").get?.();
+            return numberValue(row?.count);
         },
         enqueueAggregate(item) {
             db.prepare(`INSERT OR IGNORE INTO aggregate_queue (
@@ -164,6 +171,74 @@ export function openSqliteStateStore(path) {
          FROM feedback_events
          ORDER BY created_at DESC
          LIMIT ?`).all?.(limit) ?? [];
+        },
+        listEvents(sourceId, messageId, limit = 25) {
+            return db.prepare(`SELECT id, source_id, account_email, message_id, thread_id, event_type, observed_at
+         FROM intake_events
+         WHERE source_id = ? AND message_id = ?
+         ORDER BY id DESC
+         LIMIT ?`).all?.(sourceId, messageId, limit) ?? [];
+        },
+        findLatestEvent(sourceId, messageId) {
+            const row = db.prepare(`SELECT source_id, account_email, message_id, thread_id, event_type, observed_at
+         FROM intake_events
+         WHERE source_id = ? AND message_id = ?
+         ORDER BY id DESC
+         LIMIT 1`).get?.(sourceId, messageId);
+            if (!row) {
+                return undefined;
+            }
+            return {
+                sourceId: String(row.source_id),
+                accountEmail: String(row.account_email),
+                messageId: String(row.message_id),
+                ...(typeof row.thread_id === "string" ? { threadId: row.thread_id } : {}),
+                eventType: eventTypeValue(row.event_type),
+                observedAt: String(row.observed_at),
+            };
+        },
+        listDecisions(sourceId, messageId, limit = 10) {
+            const rows = db.prepare(`SELECT id, processed_at, source_id, account_email, message_id, thread_id,
+          security_json, routing_json, actions_json, dry_run
+         FROM decisions
+         WHERE source_id = ? AND message_id = ?
+         ORDER BY id DESC
+         LIMIT ?`).all?.(sourceId, messageId, limit) ?? [];
+            return rows.map((row) => normalizeDecisionRow(row));
+        },
+        getSourceStats(sourceId) {
+            const decisionStats = db.prepare(`SELECT
+          COUNT(*) AS decisions,
+          MAX(processed_at) AS last_decision_at,
+          SUM(CASE WHEN routing_json IS NULL THEN 1 ELSE 0 END) AS quarantined
+         FROM decisions
+         WHERE source_id = ?`).get?.(sourceId);
+            const processedStats = db.prepare(`SELECT COUNT(*) AS processed, MAX(processed_at) AS last_processed_at
+         FROM processed_messages
+         WHERE source_id = ?`).get?.(sourceId);
+            const eventStats = db.prepare(`SELECT COUNT(*) AS events, MAX(observed_at) AS last_event_at
+         FROM intake_events
+         WHERE source_id = ?`).get?.(sourceId);
+            const actionStats = db.prepare(`SELECT
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_actions,
+          MAX(attempted_at) AS last_action_at
+         FROM action_attempts
+         WHERE source_id = ?`).get?.(sourceId);
+            const aggregateStats = db.prepare(`SELECT COUNT(*) AS pending_aggregates
+         FROM aggregate_queue
+         WHERE source_id = ? AND delivered_at IS NULL`).get?.(sourceId);
+            return {
+                decisions: numberValue(decisionStats?.decisions),
+                processed: numberValue(processedStats?.processed),
+                events: numberValue(eventStats?.events),
+                quarantined: numberValue(decisionStats?.quarantined),
+                failedActions: numberValue(actionStats?.failed_actions),
+                pendingAggregates: numberValue(aggregateStats?.pending_aggregates),
+                ...(typeof decisionStats?.last_decision_at === "string" ? { lastDecisionAt: decisionStats.last_decision_at } : {}),
+                ...(typeof processedStats?.last_processed_at === "string" ? { lastProcessedAt: processedStats.last_processed_at } : {}),
+                ...(typeof eventStats?.last_event_at === "string" ? { lastEventAt: eventStats.last_event_at } : {}),
+                ...(typeof actionStats?.last_action_at === "string" ? { lastActionAt: actionStats.last_action_at } : {}),
+            };
         },
         getSourceCursor(sourceId) {
             const row = db.prepare("SELECT cursor_json FROM source_cursors WHERE source_id = ?").get?.(sourceId);
@@ -352,4 +427,37 @@ function parseStringArray(value) {
     catch {
         return [];
     }
+}
+function normalizeDecisionRow(row) {
+    return {
+        id: row.id,
+        processedAt: row.processed_at,
+        sourceId: row.source_id,
+        accountEmail: row.account_email,
+        messageId: row.message_id,
+        threadId: row.thread_id,
+        security: parseJson(row.security_json),
+        routing: parseJson(row.routing_json),
+        actions: parseJson(row.actions_json),
+        dryRun: Boolean(row.dry_run),
+    };
+}
+function parseJson(value) {
+    if (typeof value !== "string") {
+        return undefined;
+    }
+    try {
+        return JSON.parse(value);
+    }
+    catch {
+        return undefined;
+    }
+}
+function numberValue(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function eventTypeValue(value) {
+    return value === "gmail_history" || value === "gmail_watch" || value === "poll_candidate"
+        ? value
+        : "poll_candidate";
 }

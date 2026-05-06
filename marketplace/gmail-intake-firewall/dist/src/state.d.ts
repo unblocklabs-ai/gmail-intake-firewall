@@ -20,12 +20,17 @@ export type SqliteStateStore = {
     recordActionStatus(decision: DecisionLogEntry, status: ActionExecutionStatus, attemptedAt?: string): void;
     listActionStatuses(sourceId: string, messageId: string): Array<Record<string, unknown>>;
     listActionAttempts(sourceId: string, messageId: string): Array<Record<string, unknown>>;
+    countPendingAggregates(): number;
     enqueueAggregate(item: AggregateItem): void;
     listAggregateQueue(limit?: number): AggregateItem[];
     markAggregateDelivered(items: AggregateItem[], deliveredAt?: string): void;
     recordEvent(event: IntakeEvent): void;
     recordFeedback(event: Record<string, unknown>): void;
     listFeedbackEvents(limit?: number): Array<Record<string, unknown>>;
+    listEvents(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
+    findLatestEvent(sourceId: string, messageId: string): IntakeEvent | undefined;
+    listDecisions(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
+    getSourceStats(sourceId: string): Record<string, unknown>;
     getSourceCursor(sourceId: string): Record<string, unknown> | undefined;
     setSourceCursor(sourceId: string, cursor: Record<string, unknown>, updatedAt?: string): void;
     close(): void;

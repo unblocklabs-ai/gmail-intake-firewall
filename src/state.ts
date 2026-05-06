@@ -85,12 +85,17 @@ export type SqliteStateStore = {
   recordActionStatus(decision: DecisionLogEntry, status: ActionExecutionStatus, attemptedAt?: string): void;
   listActionStatuses(sourceId: string, messageId: string): Array<Record<string, unknown>>;
   listActionAttempts(sourceId: string, messageId: string): Array<Record<string, unknown>>;
+  countPendingAggregates(): number;
   enqueueAggregate(item: AggregateItem): void;
   listAggregateQueue(limit?: number): AggregateItem[];
   markAggregateDelivered(items: AggregateItem[], deliveredAt?: string): void;
   recordEvent(event: IntakeEvent): void;
   recordFeedback(event: Record<string, unknown>): void;
   listFeedbackEvents(limit?: number): Array<Record<string, unknown>>;
+  listEvents(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
+  findLatestEvent(sourceId: string, messageId: string): IntakeEvent | undefined;
+  listDecisions(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
+  getSourceStats(sourceId: string): Record<string, unknown>;
   getSourceCursor(sourceId: string): Record<string, unknown> | undefined;
   setSourceCursor(sourceId: string, cursor: Record<string, unknown>, updatedAt?: string): void;
   close(): void;
@@ -179,7 +184,12 @@ export function openSqliteStateStore(path: string): SqliteStateStore {
       );
     },
     listActionStatuses(sourceId: string, messageId: string): Array<Record<string, unknown>> {
-      return this.listActionAttempts(sourceId, messageId);
+      return db.prepare(
+        `SELECT action_index, action_type, required, status, error, attempted_at
+         FROM action_statuses
+         WHERE source_id = ? AND message_id = ?
+         ORDER BY action_index ASC`,
+      ).all?.(sourceId, messageId) as Array<Record<string, unknown>> ?? [];
     },
     listActionAttempts(sourceId: string, messageId: string): Array<Record<string, unknown>> {
       return db.prepare(
@@ -188,6 +198,12 @@ export function openSqliteStateStore(path: string): SqliteStateStore {
          WHERE source_id = ? AND message_id = ?
          ORDER BY id ASC`,
       ).all?.(sourceId, messageId) as Array<Record<string, unknown>> ?? [];
+    },
+    countPendingAggregates(): number {
+      const row = db.prepare(
+        "SELECT COUNT(*) AS count FROM aggregate_queue WHERE delivered_at IS NULL",
+      ).get?.() as Record<string, unknown> | undefined;
+      return numberValue(row?.count);
     },
     enqueueAggregate(item: AggregateItem): void {
       db.prepare(
@@ -287,6 +303,90 @@ export function openSqliteStateStore(path: string): SqliteStateStore {
          ORDER BY created_at DESC
          LIMIT ?`,
       ).all?.(limit) as Array<Record<string, unknown>> ?? [];
+    },
+    listEvents(sourceId: string, messageId: string, limit = 25): Array<Record<string, unknown>> {
+      return db.prepare(
+        `SELECT id, source_id, account_email, message_id, thread_id, event_type, observed_at
+         FROM intake_events
+         WHERE source_id = ? AND message_id = ?
+         ORDER BY id DESC
+         LIMIT ?`,
+      ).all?.(sourceId, messageId, limit) as Array<Record<string, unknown>> ?? [];
+    },
+    findLatestEvent(sourceId: string, messageId: string): IntakeEvent | undefined {
+      const row = db.prepare(
+        `SELECT source_id, account_email, message_id, thread_id, event_type, observed_at
+         FROM intake_events
+         WHERE source_id = ? AND message_id = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+      ).get?.(sourceId, messageId) as Record<string, unknown> | undefined;
+      if (!row) {
+        return undefined;
+      }
+      return {
+        sourceId: String(row.source_id),
+        accountEmail: String(row.account_email),
+        messageId: String(row.message_id),
+        ...(typeof row.thread_id === "string" ? { threadId: row.thread_id } : {}),
+        eventType: eventTypeValue(row.event_type),
+        observedAt: String(row.observed_at),
+      };
+    },
+    listDecisions(sourceId: string, messageId: string, limit = 10): Array<Record<string, unknown>> {
+      const rows = db.prepare(
+        `SELECT id, processed_at, source_id, account_email, message_id, thread_id,
+          security_json, routing_json, actions_json, dry_run
+         FROM decisions
+         WHERE source_id = ? AND message_id = ?
+         ORDER BY id DESC
+         LIMIT ?`,
+      ).all?.(sourceId, messageId, limit) ?? [];
+      return rows.map((row) => normalizeDecisionRow(row as Record<string, unknown>));
+    },
+    getSourceStats(sourceId: string): Record<string, unknown> {
+      const decisionStats = db.prepare(
+        `SELECT
+          COUNT(*) AS decisions,
+          MAX(processed_at) AS last_decision_at,
+          SUM(CASE WHEN routing_json IS NULL THEN 1 ELSE 0 END) AS quarantined
+         FROM decisions
+         WHERE source_id = ?`,
+      ).get?.(sourceId) as Record<string, unknown> | undefined;
+      const processedStats = db.prepare(
+        `SELECT COUNT(*) AS processed, MAX(processed_at) AS last_processed_at
+         FROM processed_messages
+         WHERE source_id = ?`,
+      ).get?.(sourceId) as Record<string, unknown> | undefined;
+      const eventStats = db.prepare(
+        `SELECT COUNT(*) AS events, MAX(observed_at) AS last_event_at
+         FROM intake_events
+         WHERE source_id = ?`,
+      ).get?.(sourceId) as Record<string, unknown> | undefined;
+      const actionStats = db.prepare(
+        `SELECT
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_actions,
+          MAX(attempted_at) AS last_action_at
+         FROM action_attempts
+         WHERE source_id = ?`,
+      ).get?.(sourceId) as Record<string, unknown> | undefined;
+      const aggregateStats = db.prepare(
+        `SELECT COUNT(*) AS pending_aggregates
+         FROM aggregate_queue
+         WHERE source_id = ? AND delivered_at IS NULL`,
+      ).get?.(sourceId) as Record<string, unknown> | undefined;
+      return {
+        decisions: numberValue(decisionStats?.decisions),
+        processed: numberValue(processedStats?.processed),
+        events: numberValue(eventStats?.events),
+        quarantined: numberValue(decisionStats?.quarantined),
+        failedActions: numberValue(actionStats?.failed_actions),
+        pendingAggregates: numberValue(aggregateStats?.pending_aggregates),
+        ...(typeof decisionStats?.last_decision_at === "string" ? { lastDecisionAt: decisionStats.last_decision_at } : {}),
+        ...(typeof processedStats?.last_processed_at === "string" ? { lastProcessedAt: processedStats.last_processed_at } : {}),
+        ...(typeof eventStats?.last_event_at === "string" ? { lastEventAt: eventStats.last_event_at } : {}),
+        ...(typeof actionStats?.last_action_at === "string" ? { lastActionAt: actionStats.last_action_at } : {}),
+      };
     },
     getSourceCursor(sourceId: string): Record<string, unknown> | undefined {
       const row = db.prepare(
@@ -479,4 +579,40 @@ function parseStringArray(value: unknown): string[] {
   } catch {
     return [];
   }
+}
+
+function normalizeDecisionRow(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id,
+    processedAt: row.processed_at,
+    sourceId: row.source_id,
+    accountEmail: row.account_email,
+    messageId: row.message_id,
+    threadId: row.thread_id,
+    security: parseJson(row.security_json),
+    routing: parseJson(row.routing_json),
+    actions: parseJson(row.actions_json),
+    dryRun: Boolean(row.dry_run),
+  };
+}
+
+function parseJson(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function eventTypeValue(value: unknown): IntakeEvent["eventType"] {
+  return value === "gmail_history" || value === "gmail_watch" || value === "poll_candidate"
+    ? value
+    : "poll_candidate";
 }

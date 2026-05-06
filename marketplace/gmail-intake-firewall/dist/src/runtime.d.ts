@@ -33,6 +33,12 @@ export type BackfillOptions = {
     force?: boolean;
     dryRun?: boolean;
 };
+export type ReplayOptions = {
+    sourceId: string;
+    messageId: string;
+    force?: boolean;
+    dryRun?: boolean;
+};
 export declare class GmailIntakePollingRuntime {
     private readonly config;
     private readonly deps;
@@ -46,6 +52,9 @@ export declare class GmailIntakePollingRuntime {
     runBackfill(options: BackfillOptions): Promise<PollingRunSummary>;
     drainAggregates(now?: Date): Promise<PollingRunSummary>;
     probe(): Record<string, unknown>;
+    status(): Record<string, unknown>;
+    inspectMessage(sourceId: string, messageId: string): Record<string, unknown>;
+    replayEvent(options: ReplayOptions): Promise<PollingRunSummary>;
     private runSource;
     private processEvent;
     private enabledSources;
