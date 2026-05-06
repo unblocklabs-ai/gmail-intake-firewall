@@ -19,6 +19,12 @@ type RuntimeReadinessFinding = {
   message: string;
 };
 
+const PUBSUB_ROUTE_ID = "gmail-intake-firewall-pubsub";
+const PUBSUB_ROUTE_PATH = "/gmail-intake-firewall/pubsub";
+const PUBSUB_ROUTE_AUTH = "plugin" as const;
+const PUBSUB_ROUTE_MATCH = "exact" as const;
+const PUBSUB_ROUTE_ACTIVATION_HINT = "gateway-webhook";
+
 export function registerGmailIntakeFirewallPlugin(api: unknown): void {
   const host = api && typeof api === "object" ? api as Record<string, unknown> : {};
   const rawConfig = "pluginConfig" in host ? host.pluginConfig : "config" in host ? host.config : undefined;
@@ -63,10 +69,10 @@ function buildPubSubHttpRoute(
   handler: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 } {
   return {
-    id: "gmail-intake-firewall-pubsub",
-    path: "/gmail-intake-firewall/pubsub",
-    auth: "plugin",
-    match: "exact",
+    id: PUBSUB_ROUTE_ID,
+    path: PUBSUB_ROUTE_PATH,
+    auth: PUBSUB_ROUTE_AUTH,
+    match: PUBSUB_ROUTE_MATCH,
     async handler(req, res) {
       if (req.method && req.method.toUpperCase() !== "POST") {
         sendJson(res, 405, { ok: false, error: "method_not_allowed" }, { Allow: "POST" });
@@ -78,6 +84,11 @@ function buildPubSubHttpRoute(
       }
       if (!requestHasWebhookSecret(req, config.webhookSecret)) {
         sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return true;
+      }
+      const serviceReady = await ensureHttpServiceStarted(service);
+      if (!serviceReady.ok) {
+        sendJson(res, 503, serviceReady.body);
         return true;
       }
       const body = await readJsonRequestBody(req, 256 * 1024);
@@ -96,6 +107,41 @@ function buildPubSubHttpRoute(
       }
       return true;
     },
+  };
+}
+
+async function ensureHttpServiceStarted(
+  service: ReturnType<typeof buildGmailIntakeFirewallService>,
+): Promise<
+  | { ok: true }
+  | { ok: false; body: Record<string, unknown> }
+> {
+  const status = await service.status();
+  if (status.started === true) {
+    return { ok: true };
+  }
+  const start = await service.start();
+  if (start.ok === true && start.state === "ready") {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    body: {
+      ok: false,
+      error: "service_not_ready",
+      service: start,
+    },
+  };
+}
+
+function pubSubHttpRouteStatus(config: ReturnType<typeof resolvePluginConfig>): Record<string, unknown> {
+  return {
+    id: PUBSUB_ROUTE_ID,
+    path: PUBSUB_ROUTE_PATH,
+    auth: PUBSUB_ROUTE_AUTH,
+    match: PUBSUB_ROUTE_MATCH,
+    webhookSecretConfigured: Boolean(config.webhookSecret),
+    routeActivationHint: PUBSUB_ROUTE_ACTIVATION_HINT,
   };
 }
 
@@ -249,6 +295,7 @@ function buildGmailIntakeFirewallService(
         enabled: config.enabled,
         sources: config.sources.filter((source) => source.enabled).length,
         dryRun: config.dryRun,
+        httpRoute: pubSubHttpRouteStatus(config),
         state: config.enabled ? "ready" : "disabled",
         validation,
         runtimeReadiness,
@@ -274,6 +321,7 @@ function buildGmailIntakeFirewallService(
         service: "gmail-intake-firewall-service",
         enabled: config.enabled,
         configuredSources: config.sources.length,
+        httpRoute: pubSubHttpRouteStatus(config),
         sqlitePath: config.sqlitePath,
         validation,
         ...runtimeProbe,
@@ -288,6 +336,7 @@ function buildGmailIntakeFirewallService(
           enabled: config.enabled,
           dryRun: config.dryRun,
           configuredSources: config.sources.length,
+          httpRoute: pubSubHttpRouteStatus(config),
           validation: validatePluginConfig(config),
           runtimeReadiness,
         };
@@ -297,6 +346,7 @@ function buildGmailIntakeFirewallService(
         service: "gmail-intake-firewall-service",
         started: true,
         runtimeReadiness,
+        httpRoute: pubSubHttpRouteStatus(config),
         ...runtime.status(),
       };
     },

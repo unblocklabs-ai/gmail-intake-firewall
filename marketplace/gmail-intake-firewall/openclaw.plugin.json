@@ -10,8 +10,10 @@
   ],
   "activation": {
     "onStartup": true,
+    "onRoutes": [
+      "gateway-webhook"
+    ],
     "onCapabilities": [
-      "service",
       "tool"
     ]
   },

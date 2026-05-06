@@ -91,6 +91,14 @@ test("plugin service exposes validation and status operator methods", async () =
   assert.equal(status.started, true);
   assert.equal(Array.isArray(status.sources), true);
   assert.equal(Array.isArray(status.runtimeReadiness), true);
+  assert.deepEqual(status.httpRoute, {
+    id: "gmail-intake-firewall-pubsub",
+    path: "/gmail-intake-firewall/pubsub",
+    auth: "plugin",
+    match: "exact",
+    webhookSecretConfigured: false,
+    routeActivationHint: "gateway-webhook",
+  });
 });
 
 test("plugin prefers api.pluginConfig over api.config", async () => {
@@ -360,8 +368,6 @@ test("plugin Pub/Sub HTTP route handles authorized notification envelopes", asyn
 
   assert.ok(service);
   assert.ok(route);
-  await service.start();
-  await new Promise((resolve) => setImmediate(resolve));
   const payload = Buffer.from(JSON.stringify({
     emailAddress: "user@example.com",
     historyId: "120",
