@@ -250,6 +250,9 @@ test("polling runtime leaves message pending when a required action fails", asyn
     { action_type: "gmail_label", required: 1, status: "succeeded" },
     { action_type: "human_alert", required: 1, status: "failed" },
   ]);
+  const status = runtime.status() as { sources?: Array<{ lastPoll?: { stage?: string; error?: { message?: string } } }> };
+  assert.equal(status.sources?.[0]?.lastPoll?.stage, "action_execute");
+  assert.match(status.sources?.[0]?.lastPoll?.error?.message ?? "", /human_alert\[1\]/);
 });
 
 test("polling runtime stores append-only action attempts across retries", async (t) => {
@@ -424,6 +427,184 @@ test("runtime consumes Gmail history events and preserves history cursor", async
 
   assert.equal(summary.processed, 1);
   assert.equal(stateStore.getSourceCursor("primary")?.historyId, "110");
+});
+
+test("runtime handles Gmail push notification by draining stored history cursor", async (t) => {
+  const stateStore = await tempStore(t);
+  stateStore.setSourceCursor("primary", { mode: "watch", historyId: "100", watchExpiresAt: "2026-05-07T12:00:00.000Z" });
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{
+      id: "primary",
+      accountEmail: "user@example.com",
+      intakeMode: "watch",
+      watchTopicName: "projects/x/topics/gmail",
+      polling: { maxResults: 1 },
+    }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        throw new Error("poll should not be used");
+      },
+      async listHistory(startHistoryId) {
+        assert.equal(startHistoryId, "100");
+        return {
+          historyId: "110",
+          candidates: [
+            { id: "msg-1", threadId: "thread-msg-1" },
+            { id: "msg-2", threadId: "thread-msg-2" },
+          ],
+        };
+      },
+      async fetchMessage(candidate) {
+        return message(candidate.id);
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    securityClassifier: { classify: async () => safeSecurity },
+    routerClassifier: {
+      classify: async () => ({
+        tags: [],
+        wakeMode: "none",
+        sanitizedSummary: "Safe runtime message.",
+        reasons: [],
+      }),
+    },
+    now: () => new Date("2026-05-06T12:00:00.000Z"),
+  });
+
+  const summary = await runtime.handleGmailNotification({ accountEmail: "user@example.com", historyId: "120" });
+  const cursor = stateStore.getSourceCursor("primary");
+  const events = stateStore.listEvents("primary", "msg-1");
+  const status = runtime.status() as { sources?: Array<{ lastPoll?: { status?: string; stage?: string } }> };
+
+  assert.equal(summary.events, 2);
+  assert.equal(summary.processed, 2);
+  assert.equal(cursor?.historyId, "110");
+  assert.equal(cursor?.notificationHistoryId, "120");
+  assert.equal(events[0]?.event_type, "gmail_watch");
+  assert.equal(stateStore.isProcessed("primary", "msg-2"), true);
+  assert.equal(status.sources?.[0]?.lastPoll?.status, "succeeded");
+  assert.equal(status.sources?.[0]?.lastPoll?.stage, "cursor_update");
+});
+
+test("runtime keeps Gmail notification history cursor on processing errors", async (t) => {
+  const stateStore = await tempStore(t);
+  stateStore.setSourceCursor("primary", { mode: "watch", historyId: "100", watchExpiresAt: "2026-05-07T12:00:00.000Z" });
+  const config = resolvePluginConfig({
+    dryRun: false,
+    sqlitePath: stateStore.path,
+    sources: [{
+      id: "primary",
+      accountEmail: "user@example.com",
+      intakeMode: "watch",
+      watchTopicName: "projects/x/topics/gmail",
+    }],
+    tags: [{ id: "client-dev", description: "Client dev", wakeMode: "wake_now", wakeTarget: "agent:dev" }],
+    wakeTargets: [{ id: "agent:dev", agentId: "dev-agent" }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        throw new Error("poll should not be used");
+      },
+      async listHistory() {
+        return { historyId: "110", candidates: [{ id: "msg-1", threadId: "thread-msg-1" }] };
+      },
+      async fetchMessage(candidate) {
+        return message(candidate.id);
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    securityClassifier: { classify: async () => safeSecurity },
+    routerClassifier: {
+      classify: async () => ({
+        tags: ["client-dev"],
+        wakeMode: "wake_now",
+        wakeTarget: "agent:dev",
+        sanitizedSummary: "Safe runtime message.",
+        reasons: ["test"],
+      }),
+    },
+    now: () => new Date("2026-05-06T12:00:00.000Z"),
+  });
+
+  const summary = await runtime.handleGmailNotification({ sourceId: "primary", accountEmail: "user@example.com", historyId: "120" });
+  const cursor = stateStore.getSourceCursor("primary");
+  const status = runtime.status() as { sources?: Array<{ lastPoll?: { status?: string; stage?: string; error?: { message?: string } } }> };
+
+  assert.equal(summary.errors, 1);
+  assert.equal(cursor?.historyId, "100");
+  assert.equal(cursor?.notificationHistoryId, "120");
+  assert.equal(status.sources?.[0]?.lastPoll?.status, "completed_with_errors");
+  assert.equal(status.sources?.[0]?.lastPoll?.stage, "action_execute");
+  assert.match(status.sources?.[0]?.lastPoll?.error?.message ?? "", /agent_wake\[0\]/);
+});
+
+test("runtime rejects mismatched and non-watch Gmail notifications", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [
+      { id: "watch", accountEmail: "watch@example.com", intakeMode: "watch", watchTopicName: "projects/x/topics/gmail" },
+      { id: "poll", accountEmail: "poll@example.com", intakeMode: "poll" },
+    ],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => {
+      throw new Error("client should not be created for rejected notifications");
+    },
+  });
+
+  const mismatched = await runtime.handleGmailNotification({ sourceId: "watch", accountEmail: "other@example.com", historyId: "120" });
+  const nonWatch = await runtime.handleGmailNotification({ sourceId: "poll", accountEmail: "poll@example.com", historyId: "121" });
+  const unknownAccount = await runtime.handleGmailNotification({ accountEmail: "missing@example.com", historyId: "122" });
+  const status = runtime.status() as { sources?: Array<{ id?: string; lastPoll?: { status?: string; error?: { message?: string } } }> };
+  const watchStatus = status.sources?.find((source) => source.id === "watch")?.lastPoll;
+  const pollStatus = status.sources?.find((source) => source.id === "poll")?.lastPoll;
+
+  assert.equal(mismatched.errors, 1);
+  assert.equal(nonWatch.errors, 1);
+  assert.equal(unknownAccount.errors, 1);
+  assert.equal(watchStatus?.status, "failed");
+  assert.match(watchStatus?.error?.message ?? "", /does not match/);
+  assert.equal(pollStatus?.status, "failed");
+  assert.match(pollStatus?.error?.message ?? "", /watch intakeMode/);
+});
+
+test("runtime advances Gmail notification cursor without processing when no stored history exists", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com", intakeMode: "watch", watchTopicName: "projects/x/topics/gmail" }],
+  });
+  let clientCreated = false;
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => {
+      clientCreated = true;
+      throw new Error("client should not be created without a cursor");
+    },
+    now: () => new Date("2026-05-06T12:00:00.000Z"),
+  });
+
+  const summary = await runtime.handleGmailNotification({ sourceId: "primary", historyId: "120" });
+  const cursor = stateStore.getSourceCursor("primary");
+
+  assert.equal(summary.skipped, 1);
+  assert.equal(summary.events, 0);
+  assert.equal(clientCreated, false);
+  assert.equal(cursor?.historyId, "120");
+  assert.equal(cursor?.lastNotificationAt, "2026-05-06T12:00:00.000Z");
 });
 
 test("runtime setup watch stores history id without processing initial snapshot", async (t) => {

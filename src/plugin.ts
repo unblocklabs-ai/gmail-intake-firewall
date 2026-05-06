@@ -1,4 +1,7 @@
+import { timingSafeEqual } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolvePluginConfig, validatePluginConfig } from "./config.js";
+import { parseGmailPushNotification } from "./gmail.js";
 import { createGoogleapisGmailClient } from "./gmailClient.js";
 import { gmailScopesAllowModify, resolveGoogleAuthMaterial, resolveSecretResolver } from "./googleAuth.js";
 import { createHostActionDeps } from "./hostActions.js";
@@ -38,11 +41,62 @@ export function registerGmailIntakeFirewallPlugin(api: unknown): void {
   }
 
   if (hasRegisterTool(api)) {
-    api.registerTool(buildOperatorStatusTool(service));
+    api.registerTool(buildOperatorStatusTool(service), { name: "gmail_intake_firewall_status" });
+  }
+
+  if (hasRegisterHttpRoute(api)) {
+    api.registerHttpRoute(buildPubSubHttpRoute(service, config));
   }
 
   void createUnavailableSecurityClassifier();
   void createNoopRouterClassifier();
+}
+
+function buildPubSubHttpRoute(
+  service: ReturnType<typeof buildGmailIntakeFirewallService>,
+  config: ReturnType<typeof resolvePluginConfig>,
+): {
+  id: string;
+  path: string;
+  auth: "plugin";
+  match: "exact";
+  handler: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
+} {
+  return {
+    id: "gmail-intake-firewall-pubsub",
+    path: "/gmail-intake-firewall/pubsub",
+    auth: "plugin",
+    match: "exact",
+    async handler(req, res) {
+      if (req.method && req.method.toUpperCase() !== "POST") {
+        sendJson(res, 405, { ok: false, error: "method_not_allowed" }, { Allow: "POST" });
+        return true;
+      }
+      if (!config.webhookSecret) {
+        sendJson(res, 503, { ok: false, error: "webhook_secret_not_configured" });
+        return true;
+      }
+      if (!requestHasWebhookSecret(req, config.webhookSecret)) {
+        sendJson(res, 401, { ok: false, error: "unauthorized" });
+        return true;
+      }
+      const body = await readJsonRequestBody(req, 256 * 1024);
+      if (!body.ok) {
+        sendJson(res, body.status, { ok: false, error: body.error });
+        return true;
+      }
+      try {
+        const result = await service.handleGmailNotification(body.value as Record<string, unknown>);
+        sendJson(res, 200, result);
+      } catch (error) {
+        sendJson(res, 400, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return true;
+    },
+  };
 }
 
 function buildOperatorStatusTool(service: ReturnType<typeof buildGmailIntakeFirewallService>): {
@@ -71,8 +125,9 @@ function buildOperatorStatusTool(service: ReturnType<typeof buildGmailIntakeFire
     },
   };
   const run = async (input: unknown): Promise<Record<string, unknown>> => {
-    const operation = input && typeof input === "object" && "operation" in input
-      ? (input as { operation?: unknown }).operation
+    const normalizedInput = normalizeToolInput(input);
+    const operation = normalizedInput && "operation" in normalizedInput
+      ? normalizedInput.operation
       : "status";
     if (operation === "probe") {
       return service.probe();
@@ -81,8 +136,8 @@ function buildOperatorStatusTool(service: ReturnType<typeof buildGmailIntakeFire
       return service.validateConfig();
     }
     if (operation === "checkSourceAuth") {
-      const sourceId = typeof (input as { sourceId?: unknown }).sourceId === "string"
-        ? (input as { sourceId: string }).sourceId
+      const sourceId = typeof normalizedInput?.sourceId === "string"
+        ? normalizedInput.sourceId
         : undefined;
       return service.checkSourceAuth(sourceId ? { sourceId } : {});
     }
@@ -99,6 +154,23 @@ function buildOperatorStatusTool(service: ReturnType<typeof buildGmailIntakeFire
     run,
     execute: run,
   };
+}
+
+function normalizeToolInput(input: unknown): Record<string, unknown> | undefined {
+  if (!input || typeof input !== "object") {
+    return undefined;
+  }
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.operation === "string") {
+    return raw;
+  }
+  for (const key of ["input", "arguments", "args", "params"]) {
+    const nested = raw[key];
+    if (nested && typeof nested === "object" && typeof (nested as Record<string, unknown>).operation === "string") {
+      return nested as Record<string, unknown>;
+    }
+  }
+  return raw;
 }
 
 function buildGmailIntakeFirewallService(
@@ -118,6 +190,7 @@ function buildGmailIntakeFirewallService(
   inspectMessage: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   replayEvent: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   drainAggregates: () => Promise<Record<string, unknown>>;
+  handleGmailNotification: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   checkSourceAuth: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   recordFeedback: (event: Record<string, unknown>) => Promise<Record<string, unknown>>;
 } {
@@ -302,6 +375,22 @@ function buildGmailIntakeFirewallService(
         ...await runtime.drainAggregates(),
       };
     },
+    async handleGmailNotification(options) {
+      if (!runtime) {
+        throw new Error("gmail-intake-firewall service is not started");
+      }
+      const notification = parseGmailPushNotification(options);
+      return {
+        ok: true,
+        service: "gmail-intake-firewall-service",
+        notification,
+        ...await runtime.handleGmailNotification({
+          ...notification,
+          ...(typeof options.force === "boolean" ? { force: options.force } : {}),
+          ...(typeof options.dryRun === "boolean" ? { dryRun: options.dryRun } : {}),
+        }),
+      };
+    },
     async checkSourceAuth(options) {
       const sourceId = typeof options.sourceId === "string" ? options.sourceId : undefined;
       const sources = sourceId
@@ -410,6 +499,86 @@ function safeSourceAuthStatus(source: GmailSourceConfig, error?: string): Record
   };
 }
 
+function sendJson(res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>): void {
+  res.statusCode = status;
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    res.setHeader(key, value);
+  }
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(body));
+}
+
+async function readJsonRequestBody(
+  req: IncomingMessage,
+  maxBytes: number,
+): Promise<{ ok: true; value: unknown } | { ok: false; status: number; error: string }> {
+  let bytes = 0;
+  const chunks: Buffer[] = [];
+  try {
+    for await (const chunk of req) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      bytes += buffer.length;
+      if (bytes > maxBytes) {
+        return { ok: false, status: 413, error: "payload_too_large" };
+      }
+      chunks.push(buffer);
+    }
+    const raw = Buffer.concat(chunks).toString("utf8").trim();
+    if (!raw) {
+      return { ok: true, value: {} };
+    }
+    return { ok: true, value: JSON.parse(raw) as unknown };
+  } catch {
+    return { ok: false, status: 400, error: "invalid_json" };
+  }
+}
+
+function requestHasWebhookSecret(req: IncomingMessage, expected: string): boolean {
+  const candidates = [
+    bearerToken(req.headers.authorization),
+    headerValue(req.headers["x-openclaw-token"]),
+    queryToken(req.url),
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  return candidates.some((candidate) => safeEqual(candidate, expected));
+}
+
+function bearerToken(value: unknown): string | undefined {
+  const header = headerValue(value);
+  if (!header || !header.toLowerCase().startsWith("bearer ")) {
+    return undefined;
+  }
+  const token = header.slice(7).trim();
+  return token || undefined;
+}
+
+function headerValue(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  if (Array.isArray(value)) {
+    return headerValue(value[0]);
+  }
+  return undefined;
+}
+
+function queryToken(url: string | undefined): string | undefined {
+  if (!url) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(url, "http://localhost");
+    return parsed.searchParams.get("token")?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeEqual(candidate: string, expected: string): boolean {
+  const left = Buffer.from(candidate);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
 function hasRegisterService(api: unknown): api is {
   registerService: (service: unknown) => unknown;
 } {
@@ -417,9 +586,15 @@ function hasRegisterService(api: unknown): api is {
 }
 
 function hasRegisterTool(api: unknown): api is {
-  registerTool: (tool: unknown) => unknown;
+  registerTool: (tool: unknown, options?: Record<string, unknown>) => unknown;
 } {
   return Boolean(api && typeof api === "object" && typeof (api as { registerTool?: unknown }).registerTool === "function");
+}
+
+function hasRegisterHttpRoute(api: unknown): api is {
+  registerHttpRoute: (route: unknown) => unknown;
+} {
+  return Boolean(api && typeof api === "object" && typeof (api as { registerHttpRoute?: unknown }).registerHttpRoute === "function");
 }
 
 async function validateRuntimeReadiness(

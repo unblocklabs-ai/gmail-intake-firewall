@@ -201,6 +201,7 @@ export function resolvePluginConfig(rawConfig: unknown): PluginConfig {
   const provider = stringValue(securityRaw.provider);
   const model = stringValue(securityRaw.model);
   const openaiApiKey = stringValue(raw.OPENAI_API_KEY);
+  const webhookSecret = stringValue(raw.webhookSecret);
   const aggregateRaw = asRecord(raw.aggregate);
   const security: SecurityConfig = {
     quarantineLabel: stringValue(securityRaw.quarantineLabel) ?? DEFAULT_SECURITY.quarantineLabel,
@@ -221,6 +222,7 @@ export function resolvePluginConfig(rawConfig: unknown): PluginConfig {
   return {
     enabled: booleanValue(raw.enabled, DEFAULT_CONFIG.enabled),
     dryRun: booleanValue(raw.dryRun, DEFAULT_CONFIG.dryRun),
+    ...(webhookSecret ? { webhookSecret } : {}),
     ...(Object.keys(asRecord(raw.openaiApiKeyRef)).length ? { openaiApiKeyRef: asRecord(raw.openaiApiKeyRef) } : {}),
     ...(openaiApiKey ? { OPENAI_API_KEY: openaiApiKey } : {}),
     openai_model: stringValue(raw.openai_model) ?? model ?? DEFAULT_CONFIG.openai_model,
@@ -266,6 +268,13 @@ export function validatePluginConfig(config: PluginConfig): ConfigValidationFind
         severity: "error",
         path: `sources.${source.id}.watchTopicName`,
         message: "watch intakeMode requires watchTopicName.",
+      });
+    }
+    if (source.intakeMode === "watch" && !config.webhookSecret) {
+      findings.push({
+        severity: "warning",
+        path: "webhookSecret",
+        message: "watch intakeMode should configure webhookSecret before exposing the Pub/Sub HTTP route.",
       });
     }
     if (source.gmailActions.enabled && (source.gmailActions.applyLabels || source.gmailActions.archive) && !source.gmailActions.hasModifyScope) {

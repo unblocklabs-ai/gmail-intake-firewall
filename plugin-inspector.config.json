@@ -10,7 +10,8 @@
     "expect": {
       "registrations": [
         "registerService",
-        "registerTool"
+        "registerTool",
+        "registerHttpRoute"
       ]
     }
   },

@@ -244,6 +244,151 @@ export class GmailIntakePollingRuntime {
         summary.errors += result.errors;
         return summary;
     }
+    async handleGmailNotification(options) {
+        const summary = this.emptySummary();
+        const resolution = this.findNotificationSource(options);
+        const source = resolution.source;
+        if (resolution.error) {
+            summary.errors += 1;
+            if (source) {
+                summary.sources = 1;
+                const safeError = safeRuntimeError(new Error(resolution.error));
+                this.pollDiagnostics.set(source.id, {
+                    status: "failed",
+                    finishedAt: this.now().toISOString(),
+                    stage: "client_create",
+                    errors: 1,
+                    error: safeError,
+                });
+                this.deps.logger?.error?.("gmail-intake-firewall Gmail notification rejected", {
+                    sourceId: source.id,
+                    stage: "client_create",
+                    error: safeError.message,
+                });
+            }
+            return summary;
+        }
+        if (!source || !source.enabled || !this.config.enabled) {
+            summary.skipped += 1;
+            return summary;
+        }
+        summary.sources = 1;
+        if (this.inFlightSources.has(source.id)) {
+            summary.skipped += 1;
+            this.pollDiagnostics.set(source.id, {
+                status: "skipped",
+                finishedAt: this.now().toISOString(),
+                stage: "candidate_list",
+                skipped: 1,
+                errors: 0,
+            });
+            this.deps.logger?.warn?.("gmail-intake-firewall Gmail notification skipped because source is already running", {
+                sourceId: source.id,
+            });
+            return summary;
+        }
+        this.inFlightSources.add(source.id);
+        const observedAt = this.now();
+        const startedAt = observedAt.toISOString();
+        let stage = "client_create";
+        this.pollDiagnostics.set(source.id, { status: "running", startedAt, stage });
+        try {
+            const cursor = this.deps.stateStore.getSourceCursor(source.id) ?? {};
+            const startHistoryId = typeof cursor.historyId === "string" ? cursor.historyId : undefined;
+            if (!startHistoryId) {
+                this.deps.stateStore.setSourceCursor(source.id, {
+                    ...cursor,
+                    mode: "watch",
+                    historyId: options.historyId,
+                    lastNotificationAt: observedAt.toISOString(),
+                    notificationHistoryId: options.historyId,
+                }, observedAt.toISOString());
+                summary.skipped += 1;
+                this.pollDiagnostics.set(source.id, {
+                    status: "skipped",
+                    startedAt,
+                    finishedAt: this.now().toISOString(),
+                    stage: "cursor_update",
+                    eventCount: 0,
+                    fetched: 0,
+                    processed: 0,
+                    skipped: summary.skipped,
+                    errors: 0,
+                });
+                return summary;
+            }
+            const client = await this.deps.gmailClientFactory(source);
+            stage = "candidate_list";
+            this.pollDiagnostics.set(source.id, { status: "running", startedAt, stage });
+            const page = await this.listHistoryOrRepair(source, client, startHistoryId);
+            const candidates = page.candidates;
+            const batch = await this.processCandidateEvents(source, client, candidates, observedAt, "gmail_watch", {
+                force: options.force ?? false,
+                ...(typeof options.dryRun === "boolean" ? { dryRun: options.dryRun } : {}),
+            });
+            stage = batch.stage;
+            summary.events += batch.events;
+            summary.fetched += batch.fetched;
+            summary.processed += batch.processed;
+            summary.skipped += batch.skipped;
+            summary.errors += batch.errors;
+            stage = "cursor_update";
+            const nextCursor = {
+                ...cursor,
+                mode: "watch",
+                lastHistoryAt: observedAt.toISOString(),
+                lastNotificationAt: observedAt.toISOString(),
+                notificationHistoryId: options.historyId,
+                candidateCount: candidates.length,
+            };
+            if (summary.errors === 0) {
+                nextCursor.historyId = page.historyId ?? options.historyId;
+            }
+            this.deps.stateStore.setSourceCursor(source.id, nextCursor, observedAt.toISOString());
+            this.pollDiagnostics.set(source.id, {
+                status: summary.errors > 0 ? "completed_with_errors" : "succeeded",
+                startedAt,
+                finishedAt: this.now().toISOString(),
+                stage,
+                eventCount: summary.events,
+                fetched: summary.fetched,
+                processed: summary.processed,
+                skipped: summary.skipped,
+                errors: summary.errors,
+                ...(batch.lastEventDiagnostic ? {
+                    stage: batch.lastEventDiagnostic.stage,
+                    error: batch.lastEventDiagnostic.error,
+                } : {}),
+            });
+        }
+        catch (error) {
+            summary.errors += 1;
+            const safeError = safeRuntimeError(error);
+            this.pollDiagnostics.set(source.id, {
+                status: "failed",
+                startedAt,
+                finishedAt: this.now().toISOString(),
+                stage,
+                eventCount: summary.events,
+                fetched: summary.fetched,
+                processed: summary.processed,
+                skipped: summary.skipped,
+                errors: summary.errors,
+                error: safeError,
+            });
+            this.deps.logger?.error?.("gmail-intake-firewall Gmail notification processing failed", {
+                sourceId: source.id,
+                stage,
+                error: safeError.message,
+                ...(safeError.code !== undefined ? { code: safeError.code } : {}),
+                ...(safeError.status !== undefined ? { status: safeError.status } : {}),
+            });
+        }
+        finally {
+            this.inFlightSources.delete(source.id);
+        }
+        return summary;
+    }
     async runSource(source) {
         const summary = this.emptySummary();
         summary.sources = 1;
@@ -271,26 +416,17 @@ export class GmailIntakePollingRuntime {
             stage = "candidate_list";
             this.pollDiagnostics.set(source.id, { status: "running", startedAt, stage });
             const candidates = await this.listSourceCandidates(source, client);
-            const limitedCandidates = candidates.slice(0, source.polling.maxResults);
+            const limitedCandidates = source.intakeMode === "history" || source.intakeMode === "watch"
+                ? candidates
+                : candidates.slice(0, source.polling.maxResults);
             const eventType = source.intakeMode === "history" || source.intakeMode === "watch" ? "gmail_history" : "poll_candidate";
-            const events = limitedCandidates.map((candidate) => ({
-                ...candidateToIntakeEvent(source, candidate, observedAt),
-                eventType,
-            }));
-            summary.events = events.length;
-            let lastEventDiagnostic;
-            for (const event of events) {
-                stage = "event_record";
-                this.deps.stateStore.recordEvent(event);
-                const result = await this.processEvent(client, event);
-                if (result.diagnostic) {
-                    lastEventDiagnostic = result.diagnostic;
-                }
-                summary.fetched += result.fetched;
-                summary.processed += result.processed;
-                summary.skipped += result.skipped;
-                summary.errors += result.errors;
-            }
+            const batch = await this.processCandidateEvents(source, client, limitedCandidates, observedAt, eventType);
+            stage = batch.stage;
+            summary.events += batch.events;
+            summary.fetched += batch.fetched;
+            summary.processed += batch.processed;
+            summary.skipped += batch.skipped;
+            summary.errors += batch.errors;
             stage = "cursor_update";
             const existingCursor = this.deps.stateStore.getSourceCursor(source.id) ?? {};
             this.deps.stateStore.setSourceCursor(source.id, {
@@ -309,9 +445,9 @@ export class GmailIntakePollingRuntime {
                 processed: summary.processed,
                 skipped: summary.skipped,
                 errors: summary.errors,
-                ...(lastEventDiagnostic ? {
-                    stage: lastEventDiagnostic.stage,
-                    error: lastEventDiagnostic.error,
+                ...(batch.lastEventDiagnostic ? {
+                    stage: batch.lastEventDiagnostic.stage,
+                    error: batch.lastEventDiagnostic.error,
                 } : {}),
             });
         }
@@ -340,6 +476,35 @@ export class GmailIntakePollingRuntime {
         }
         finally {
             this.inFlightSources.delete(source.id);
+        }
+        return summary;
+    }
+    async processCandidateEvents(source, client, candidates, observedAt, eventType, options = {}) {
+        const summary = {
+            events: 0,
+            fetched: 0,
+            processed: 0,
+            skipped: 0,
+            errors: 0,
+            stage: "event_record",
+        };
+        const events = candidates.map((candidate) => ({
+            ...candidateToIntakeEvent(source, candidate, observedAt),
+            eventType,
+        }));
+        summary.events = events.length;
+        for (const event of events) {
+            summary.stage = "event_record";
+            this.deps.stateStore.recordEvent(event);
+            const result = await this.processEvent(client, event, options);
+            if (result.diagnostic) {
+                summary.lastEventDiagnostic = result.diagnostic;
+                summary.stage = result.diagnostic.stage;
+            }
+            summary.fetched += result.fetched;
+            summary.processed += result.processed;
+            summary.skipped += result.skipped;
+            summary.errors += result.errors;
         }
         return summary;
     }
@@ -397,7 +562,7 @@ export class GmailIntakePollingRuntime {
                     this.deps.stateStore.recordActionStatus(result.decision, actionResult, attemptedAt);
                 }
                 if (!requiredActionsSucceeded(actionResults)) {
-                    throw new Error("One or more required actions failed; message left pending for retry");
+                    throw new Error(buildRequiredActionFailureMessage(actionResults));
                 }
                 this.deps.stateStore.markProcessed(result.decision.sourceId, result.decision.messageId, result.decision.processedAt);
                 summary.processed += 1;
@@ -423,6 +588,46 @@ export class GmailIntakePollingRuntime {
     }
     enabledSources() {
         return this.config.sources.filter((source) => source.enabled);
+    }
+    findNotificationSource(options) {
+        if (options.sourceId) {
+            const source = this.config.sources.find((candidate) => candidate.id === options.sourceId);
+            if (!source) {
+                return { error: `Unknown source: ${options.sourceId}` };
+            }
+            if (options.accountEmail && source.accountEmail.toLowerCase() !== options.accountEmail.toLowerCase()) {
+                return {
+                    source,
+                    error: `Gmail notification accountEmail ${options.accountEmail} does not match source ${source.id}`,
+                };
+            }
+            if (source.intakeMode !== "watch" || !source.watchTopicName) {
+                return {
+                    source,
+                    error: `Gmail notification source must use watch intakeMode: ${source.id}`,
+                };
+            }
+            return { source };
+        }
+        if (options.accountEmail) {
+            const accountEmail = options.accountEmail.toLowerCase();
+            const matches = this.config.sources.filter((source) => source.accountEmail.toLowerCase() === accountEmail);
+            if (matches.length === 0) {
+                return { error: `No source configured for Gmail account: ${options.accountEmail}` };
+            }
+            if (matches.length > 1) {
+                return { error: `Multiple sources configured for Gmail account: ${options.accountEmail}` };
+            }
+            const source = matches[0];
+            if (source.intakeMode !== "watch" || !source.watchTopicName) {
+                return {
+                    source,
+                    error: `Gmail notification source must use watch intakeMode: ${source.id}`,
+                };
+            }
+            return { source };
+        }
+        return { error: "Gmail notification requires sourceId or accountEmail" };
     }
     async listSourceCandidates(source, client) {
         if (source.intakeMode === "watch" && source.watchTopicName) {
@@ -635,6 +840,18 @@ function redactSecretLikeValues(value) {
         .replace(/(["'])(access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|api[_-]?key|authorization)\1\s*:\s*(["'])[^"']*\3/gi, "$1$2$1: $3[redacted]$3")
         .replace(/(access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|api[_-]?key|authorization)\s*(=|:)\s*[^,\s)}]+/gi, "$1$2 [redacted]")
         .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]");
+}
+function buildRequiredActionFailureMessage(results) {
+    const failed = results.filter((result) => result.required && result.status === "failed");
+    if (failed.length === 0) {
+        return "One or more required actions failed; message left pending for retry";
+    }
+    const details = failed.map((result) => {
+        const actionType = result.action.type;
+        const error = result.error ? `: ${redactSecretLikeValues(result.error)}` : "";
+        return `${actionType}[${result.actionIndex}]${error}`;
+    });
+    return `Required action failed: ${details.join(", ")}; message left pending for retry`;
 }
 function groupAggregateItems(items) {
     const groups = new Map();

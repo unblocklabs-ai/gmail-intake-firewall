@@ -37,6 +37,14 @@ for (const extension of packageJson.openclaw.extensions) {
   }
   assertFile(extension.replace(/^\.\//, ""));
 }
+if (!Array.isArray(packageJson.openclaw.runtimeExtensions) || packageJson.openclaw.runtimeExtensions.length !== packageJson.openclaw.extensions.length) {
+  fail("package.json openclaw.runtimeExtensions must mirror openclaw.extensions");
+}
+for (const [index, extension] of packageJson.openclaw.runtimeExtensions.entries()) {
+  if (extension !== packageJson.openclaw.extensions[index]) {
+    fail("package.json openclaw.runtimeExtensions must mirror openclaw.extensions");
+  }
+}
 if (packageJson.main !== packageJson.openclaw.extensions[0]) {
   fail(`package.json main must match OpenClaw extension entry: ${packageJson.openclaw.extensions[0]}`);
 }
@@ -66,6 +74,14 @@ const marketplacePackage = readJson(path.join(MARKETPLACE_SOURCE, "package.json"
 const marketplacePluginManifest = readJson(path.join(MARKETPLACE_SOURCE, "openclaw.plugin.json"));
 if (marketplacePackage.version !== packageJson.version) {
   fail(`Version mismatch: marketplace package=${marketplacePackage.version} package.json=${packageJson.version}`);
+}
+if (!Array.isArray(marketplacePackage.openclaw?.runtimeExtensions) || marketplacePackage.openclaw.runtimeExtensions.length !== marketplacePackage.openclaw.extensions?.length) {
+  fail("Marketplace package openclaw.runtimeExtensions must mirror openclaw.extensions");
+}
+for (const [index, extension] of marketplacePackage.openclaw.runtimeExtensions.entries()) {
+  if (extension !== marketplacePackage.openclaw.extensions[index]) {
+    fail("Marketplace package openclaw.runtimeExtensions must mirror openclaw.extensions");
+  }
 }
 if (marketplacePackage.scripts || marketplacePackage.devDependencies) {
   fail("Marketplace package must not include development scripts or devDependencies");

@@ -1,5 +1,5 @@
 import { type ActionExecutorDeps } from "./actions.js";
-import { type GmailClient } from "./gmail.js";
+import { type GmailClient, type GmailPushNotification } from "./gmail.js";
 import { type ProcessMessageDeps } from "./engine.js";
 import { type SqliteStateStore } from "./state.js";
 import type { GmailSourceConfig, PluginConfig } from "./types.js";
@@ -39,6 +39,10 @@ export type ReplayOptions = {
     force?: boolean;
     dryRun?: boolean;
 };
+export type GmailNotificationOptions = GmailPushNotification & {
+    force?: boolean;
+    dryRun?: boolean;
+};
 export declare class GmailIntakePollingRuntime {
     private readonly config;
     private readonly deps;
@@ -56,9 +60,12 @@ export declare class GmailIntakePollingRuntime {
     status(): Record<string, unknown>;
     inspectMessage(sourceId: string, messageId: string): Record<string, unknown>;
     replayEvent(options: ReplayOptions): Promise<PollingRunSummary>;
+    handleGmailNotification(options: GmailNotificationOptions): Promise<PollingRunSummary>;
     private runSource;
+    private processCandidateEvents;
     private processEvent;
     private enabledSources;
+    private findNotificationSource;
     private listSourceCandidates;
     private listHistoryOrRepair;
     private emptySummary;

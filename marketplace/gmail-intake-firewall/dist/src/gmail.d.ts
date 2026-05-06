@@ -11,6 +11,11 @@ export type GmailHistoryPage = {
     candidates: GmailCandidate[];
     historyId?: string;
 };
+export type GmailPushNotification = {
+    sourceId?: string;
+    accountEmail?: string;
+    historyId: string;
+};
 export type GmailSourceAdapter = {
     poll(source: GmailSourceConfig, observedAt?: Date): Promise<IntakeEvent[]>;
 };
@@ -26,4 +31,5 @@ export type GmailClient = {
 export declare function candidateToIntakeEvent(source: GmailSourceConfig, candidate: GmailCandidate, observedAt?: Date): IntakeEvent;
 export declare function buildCandidateQuery(source: GmailSourceConfig): string | undefined;
 export declare function extractAttachmentMetadata(parts: unknown[]): AttachmentMetadata[];
+export declare function parseGmailPushNotification(input: unknown): GmailPushNotification;
 //# sourceMappingURL=gmail.d.ts.map

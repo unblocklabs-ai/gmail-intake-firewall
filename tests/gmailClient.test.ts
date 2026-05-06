@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createGmailClientFromApi, gmailApiMessageToInboundMessage, gmailQuerySystemLabelIds, type GmailApi } from "../src/gmailClient.js";
+import { parseGmailPushNotification } from "../src/gmail.js";
 import { resolvePluginConfig } from "../src/config.js";
 
 function b64url(value: string): string {
@@ -16,6 +17,31 @@ test("Gmail query parser extracts supported system label filters", () => {
     gmailQuerySystemLabelIds("(in:inbox OR category:updates) newer_than:7d"),
     [],
   );
+});
+
+test("Gmail Pub/Sub notification parser accepts direct and push envelope payloads", () => {
+  assert.deepEqual(parseGmailPushNotification({
+    sourceId: "primary",
+    emailAddress: "user@example.com",
+    historyId: 123,
+  }), {
+    sourceId: "primary",
+    accountEmail: "user@example.com",
+    historyId: "123",
+  });
+
+  assert.deepEqual(parseGmailPushNotification({
+    message: {
+      data: b64url(JSON.stringify({ emailAddress: "user@example.com", historyId: "456" })),
+      attributes: { sourceId: "primary" },
+    },
+  }), {
+    sourceId: "primary",
+    accountEmail: "user@example.com",
+    historyId: "456",
+  });
+
+  assert.throws(() => parseGmailPushNotification({ message: { data: b64url("{}") } }), /historyId/);
 });
 
 test("Gmail API message maps to inbound message without attachment download", () => {

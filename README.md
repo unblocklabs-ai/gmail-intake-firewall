@@ -50,7 +50,7 @@ V1 is intentionally boring and reliable:
 - Suspicious alerts are Slack plus local durable log in v1; webhook and OpenClaw-channel sinks remain action-layer extension points.
 - `wake_now` targets a named wake policy resolving to agent/workspace/session data and uses detached agent wake semantics, not Slack as orchestration.
 - SQLite stores idempotency, decisions, aggregate queues, replay/event inputs, and per-source cursor state.
-- Service methods support config validation, status/probe, bounded backfill, message inspection, replay from stored intake events, aggregate draining, and feedback event recording.
+- Service methods support config validation, status/probe, bounded backfill, Gmail Pub/Sub HTTP notification handoff, message inspection, replay from stored intake events, aggregate draining, and feedback event recording.
 
 ## Privacy And Safety Invariants
 
@@ -77,7 +77,7 @@ Recommended dry-run rollout:
 
 1. Configure one source with `authRef` or `credentialRef`, `dryRun: true`, a local SQLite path, and conservative Gmail actions.
 2. Configure `openaiApiKeyRef` for `OPENAI_API_KEY`, or use the fallback `OPENAI_API_KEY` config field for local testing.
-3. Add one Slack alert sink, one quarantine label, one wake target, and a small tag policy.
+3. Add one Slack alert sink, one quarantine label, one wake target, a `webhookSecret`, and a small tag policy.
 4. Start the service and call `validateConfig()` and `status()`.
 5. Run bounded `backfill({ sourceId, query, maxResults, dryRun: true })`.
 6. Use `inspectMessage({ sourceId, messageId })` to review events, decisions, and action attempts.
@@ -88,6 +88,8 @@ Service methods:
 - `validateConfig()` returns actionable config errors/warnings for duplicate ids, missing wake targets, invalid aggregate cadences, invalid timezones, watch mode without a topic, and likely Gmail scope mismatches.
 - `status()` reports configured sources, per-source cursor/state, last poll status/error stage, pending aggregate count, processed counts, quarantine counts, failed action attempts, and aggregate timezone.
 - `backfill(options)` runs bounded replay from Gmail candidates. Through the plugin service, `query` or `maxResults` is required unless `allowUnbounded: true` is explicit.
+- `handleGmailNotification(options)` accepts a direct Gmail notification or Pub/Sub push envelope. It resolves the source by `sourceId` or Gmail `emailAddress`, drains Gmail history from the stored cursor, records `gmail_watch` intake events, and updates the cursor. If no stored cursor exists, it records the notification history id and skips processing rather than guessing a starting point.
+- `POST /gmail-intake-firewall/pubsub` is the HTTP route for Gmail Pub/Sub push delivery. It requires `webhookSecret` as `Authorization: Bearer <secret>`, `x-openclaw-token`, or a `token` query parameter. The route is intentionally plugin-authenticated rather than operator-authenticated so Google Pub/Sub can call it.
 - `inspectMessage({ sourceId, messageId })` returns stored intake events, decisions, and append-only action attempts for one message.
 - `replayEvent({ sourceId, messageId, force, dryRun })` reprocesses the latest stored intake event for a message, useful after classifier or policy changes.
 - `drainAggregates()` sends due digest wakes. Daily and weekly cadence checks use `aggregate.timezone`; hourly cadence remains elapsed-time based.
@@ -97,6 +99,7 @@ Example policy skeleton:
 ```json
 {
   "dryRun": true,
+  "webhookSecret": "replace-with-long-random-secret",
   "openaiApiKeyRef": { "source": "openclaw", "provider": "secrets", "id": "OPENAI_API_KEY" },
   "openai_model": "gpt-5.5",
   "sqlitePath": "~/.openclaw/gmail-intake-firewall/state.sqlite",
@@ -204,7 +207,8 @@ The next phase should build the real end-to-end v1 around the scaffold. Phase 1 
 
 9. Remaining after Phase 2 foundation.
    - Done: add operator-grade poll diagnostics for gateway/service startup paths, including redacted stage-specific errors in logs and status output.
-   - Wire actual Pub/Sub push delivery from host infrastructure into Gmail history processing.
+   - Done: add a service-level Gmail Pub/Sub notification handoff that drains stored history cursors.
+   - Done: add authenticated `POST /gmail-intake-firewall/pubsub` route for host HTTP/PubSub delivery.
    - Add full install examples for Gmail OAuth and Pub/Sub setup.
    - Expand Slack feedback buttons from recorded feedback events into rule/example updates.
    - Add richer thread-aware classifier prompts using bounded thread context.

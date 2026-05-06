@@ -75,6 +75,9 @@
     "extensions": [
       "./dist/index.js"
     ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
     "compat": {
       "pluginApi": ">=2026.5.3",
       "minGatewayVersion": "2026.5.3"

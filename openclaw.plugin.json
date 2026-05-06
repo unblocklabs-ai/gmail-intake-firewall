@@ -47,6 +47,12 @@
       "secret": true,
       "advanced": true
     },
+    "webhookSecret": {
+      "label": "Webhook Secret",
+      "help": "Shared secret required by the Gmail Pub/Sub HTTP route. Pass as Bearer token, x-openclaw-token, or token query parameter.",
+      "secret": true,
+      "advanced": true
+    },
     "openai_model": {
       "label": "OpenAI Model",
       "help": "OpenAI model used by the standalone security classifier."
@@ -98,6 +104,10 @@
       "OPENAI_API_KEY": {
         "type": "string",
         "description": "Fallback config-level OpenAI API key. Prefer openaiApiKeyRef."
+      },
+      "webhookSecret": {
+        "type": "string",
+        "description": "Shared secret required by the Gmail Pub/Sub HTTP route."
       },
       "openai_model": {
         "type": "string",

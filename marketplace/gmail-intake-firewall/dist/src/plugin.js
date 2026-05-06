@@ -1,4 +1,6 @@
+import { timingSafeEqual } from "node:crypto";
 import { resolvePluginConfig, validatePluginConfig } from "./config.js";
+import { parseGmailPushNotification } from "./gmail.js";
 import { createGoogleapisGmailClient } from "./gmailClient.js";
 import { gmailScopesAllowModify, resolveGoogleAuthMaterial, resolveSecretResolver } from "./googleAuth.js";
 import { createHostActionDeps } from "./hostActions.js";
@@ -25,10 +27,51 @@ export function registerGmailIntakeFirewallPlugin(api) {
         api.registerService(service);
     }
     if (hasRegisterTool(api)) {
-        api.registerTool(buildOperatorStatusTool(service));
+        api.registerTool(buildOperatorStatusTool(service), { name: "gmail_intake_firewall_status" });
+    }
+    if (hasRegisterHttpRoute(api)) {
+        api.registerHttpRoute(buildPubSubHttpRoute(service, config));
     }
     void createUnavailableSecurityClassifier();
     void createNoopRouterClassifier();
+}
+function buildPubSubHttpRoute(service, config) {
+    return {
+        id: "gmail-intake-firewall-pubsub",
+        path: "/gmail-intake-firewall/pubsub",
+        auth: "plugin",
+        match: "exact",
+        async handler(req, res) {
+            if (req.method && req.method.toUpperCase() !== "POST") {
+                sendJson(res, 405, { ok: false, error: "method_not_allowed" }, { Allow: "POST" });
+                return true;
+            }
+            if (!config.webhookSecret) {
+                sendJson(res, 503, { ok: false, error: "webhook_secret_not_configured" });
+                return true;
+            }
+            if (!requestHasWebhookSecret(req, config.webhookSecret)) {
+                sendJson(res, 401, { ok: false, error: "unauthorized" });
+                return true;
+            }
+            const body = await readJsonRequestBody(req, 256 * 1024);
+            if (!body.ok) {
+                sendJson(res, body.status, { ok: false, error: body.error });
+                return true;
+            }
+            try {
+                const result = await service.handleGmailNotification(body.value);
+                sendJson(res, 200, result);
+            }
+            catch (error) {
+                sendJson(res, 400, {
+                    ok: false,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+            return true;
+        },
+    };
 }
 function buildOperatorStatusTool(service) {
     const schema = {
@@ -46,8 +89,9 @@ function buildOperatorStatusTool(service) {
         },
     };
     const run = async (input) => {
-        const operation = input && typeof input === "object" && "operation" in input
-            ? input.operation
+        const normalizedInput = normalizeToolInput(input);
+        const operation = normalizedInput && "operation" in normalizedInput
+            ? normalizedInput.operation
             : "status";
         if (operation === "probe") {
             return service.probe();
@@ -56,8 +100,8 @@ function buildOperatorStatusTool(service) {
             return service.validateConfig();
         }
         if (operation === "checkSourceAuth") {
-            const sourceId = typeof input.sourceId === "string"
-                ? input.sourceId
+            const sourceId = typeof normalizedInput?.sourceId === "string"
+                ? normalizedInput.sourceId
                 : undefined;
             return service.checkSourceAuth(sourceId ? { sourceId } : {});
         }
@@ -74,6 +118,22 @@ function buildOperatorStatusTool(service) {
         run,
         execute: run,
     };
+}
+function normalizeToolInput(input) {
+    if (!input || typeof input !== "object") {
+        return undefined;
+    }
+    const raw = input;
+    if (typeof raw.operation === "string") {
+        return raw;
+    }
+    for (const key of ["input", "arguments", "args", "params"]) {
+        const nested = raw[key];
+        if (nested && typeof nested === "object" && typeof nested.operation === "string") {
+            return nested;
+        }
+    }
+    return raw;
 }
 function buildGmailIntakeFirewallService(config, host, logger) {
     let runtime;
@@ -257,6 +317,22 @@ function buildGmailIntakeFirewallService(config, host, logger) {
                 ...await runtime.drainAggregates(),
             };
         },
+        async handleGmailNotification(options) {
+            if (!runtime) {
+                throw new Error("gmail-intake-firewall service is not started");
+            }
+            const notification = parseGmailPushNotification(options);
+            return {
+                ok: true,
+                service: "gmail-intake-firewall-service",
+                notification,
+                ...await runtime.handleGmailNotification({
+                    ...notification,
+                    ...(typeof options.force === "boolean" ? { force: options.force } : {}),
+                    ...(typeof options.dryRun === "boolean" ? { dryRun: options.dryRun } : {}),
+                }),
+            };
+        },
         async checkSourceAuth(options) {
             const sourceId = typeof options.sourceId === "string" ? options.sourceId : undefined;
             const sources = sourceId
@@ -360,11 +436,86 @@ function safeSourceAuthStatus(source, error) {
         ...(error ? { error } : {}),
     };
 }
+function sendJson(res, status, body, headers) {
+    res.statusCode = status;
+    for (const [key, value] of Object.entries(headers ?? {})) {
+        res.setHeader(key, value);
+    }
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.end(JSON.stringify(body));
+}
+async function readJsonRequestBody(req, maxBytes) {
+    let bytes = 0;
+    const chunks = [];
+    try {
+        for await (const chunk of req) {
+            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+            bytes += buffer.length;
+            if (bytes > maxBytes) {
+                return { ok: false, status: 413, error: "payload_too_large" };
+            }
+            chunks.push(buffer);
+        }
+        const raw = Buffer.concat(chunks).toString("utf8").trim();
+        if (!raw) {
+            return { ok: true, value: {} };
+        }
+        return { ok: true, value: JSON.parse(raw) };
+    }
+    catch {
+        return { ok: false, status: 400, error: "invalid_json" };
+    }
+}
+function requestHasWebhookSecret(req, expected) {
+    const candidates = [
+        bearerToken(req.headers.authorization),
+        headerValue(req.headers["x-openclaw-token"]),
+        queryToken(req.url),
+    ].filter((candidate) => Boolean(candidate));
+    return candidates.some((candidate) => safeEqual(candidate, expected));
+}
+function bearerToken(value) {
+    const header = headerValue(value);
+    if (!header || !header.toLowerCase().startsWith("bearer ")) {
+        return undefined;
+    }
+    const token = header.slice(7).trim();
+    return token || undefined;
+}
+function headerValue(value) {
+    if (typeof value === "string" && value.trim()) {
+        return value.trim();
+    }
+    if (Array.isArray(value)) {
+        return headerValue(value[0]);
+    }
+    return undefined;
+}
+function queryToken(url) {
+    if (!url) {
+        return undefined;
+    }
+    try {
+        const parsed = new URL(url, "http://localhost");
+        return parsed.searchParams.get("token")?.trim() || undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function safeEqual(candidate, expected) {
+    const left = Buffer.from(candidate);
+    const right = Buffer.from(expected);
+    return left.length === right.length && timingSafeEqual(left, right);
+}
 function hasRegisterService(api) {
     return Boolean(api && typeof api === "object" && typeof api.registerService === "function");
 }
 function hasRegisterTool(api) {
     return Boolean(api && typeof api === "object" && typeof api.registerTool === "function");
+}
+function hasRegisterHttpRoute(api) {
+    return Boolean(api && typeof api === "object" && typeof api.registerHttpRoute === "function");
 }
 async function validateRuntimeReadiness(config, secretResolver, openaiApiKey) {
     const findings = [];

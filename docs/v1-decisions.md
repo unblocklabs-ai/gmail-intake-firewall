@@ -2,7 +2,7 @@
 
 ## Intake
 
-V1 started with Gmail polling only. Phase 2 adds Gmail history/watch-shaped intake while retaining polling as fallback and repair/backfill. Pub/Sub push delivery is expected to be provided by host infrastructure; the plugin stores watch/history cursors and converts deltas into internal `IntakeEvent` objects.
+V1 started with Gmail polling only. Phase 2 adds Gmail history/watch-shaped intake while retaining polling as fallback and repair/backfill. Pub/Sub push delivery can be handed to the plugin through `POST /gmail-intake-firewall/pubsub`, which requires the configured `webhookSecret` as a bearer token, `x-openclaw-token`, or `token` query parameter. The service also exposes `handleGmailNotification(options)` for direct host calls. The runtime drains from its stored cursor and only uses the notification `historyId` as the next cursor marker; without a stored cursor it records the notification and skips message processing.
 
 ## Auth
 

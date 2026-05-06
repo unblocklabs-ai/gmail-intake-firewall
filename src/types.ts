@@ -74,6 +74,7 @@ export type AlertSinkConfig = {
 export type PluginConfig = {
   enabled: boolean;
   dryRun: boolean;
+  webhookSecret?: string;
   openaiApiKeyRef?: SecretRef | Record<string, unknown>;
   OPENAI_API_KEY?: string;
   openai_model: string;
