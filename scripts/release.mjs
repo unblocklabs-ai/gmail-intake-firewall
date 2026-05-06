@@ -16,7 +16,6 @@ const RELEASE_STAGE_PATHS = [
   "package-lock.json",
   "openclaw.plugin.json",
   ".claude-plugin/marketplace.json",
-  "dist",
   `marketplace/${PLUGIN_ID}`,
 ];
 
