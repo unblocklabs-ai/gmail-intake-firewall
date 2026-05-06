@@ -1,12 +1,21 @@
 import { extractLinksFromGmailContent, normalizeLinks, sanitizeGmailBody } from "./gmailSanitize.js";
+const DEFAULT_MALICIOUS_THRESHOLD = 0.65;
+const DEFAULT_UNCERTAIN_THRESHOLD = 0.35;
 export function shouldQuarantine(classification, security) {
-    if (classification.verdict === "risky" || classification.verdict === "malicious") {
-        return classification.riskScore >= security.maliciousThreshold;
+    if (classification.verdict === "malicious") {
+        return true;
+    }
+    if (classification.verdict === "risky") {
+        return classification.riskScore >= numericThreshold(security.maliciousThreshold, DEFAULT_MALICIOUS_THRESHOLD);
     }
     if (classification.verdict === "uncertain") {
-        return security.failClosedOnUncertain || classification.riskScore >= security.uncertainThreshold;
+        return security.failClosedOnUncertain !== false ||
+            classification.riskScore >= numericThreshold(security.uncertainThreshold, DEFAULT_UNCERTAIN_THRESHOLD);
     }
     return false;
+}
+function numericThreshold(value, fallback) {
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 export function normalizeMessageForSecurity(message, maxBodyChars) {
     const textBody = sanitizeGmailBody(message.bodyText, false);
