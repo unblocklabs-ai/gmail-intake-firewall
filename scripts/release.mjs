@@ -8,12 +8,14 @@ const ROOT = process.cwd();
 const PLUGIN_ID = "gmail-intake-firewall";
 const PACKAGE_JSON_PATH = path.join(ROOT, "package.json");
 const PACKAGE_LOCK_PATH = path.join(ROOT, "package-lock.json");
+const INDEX_TS_PATH = path.join(ROOT, "index.ts");
 const OPENCLAW_PLUGIN_PATH = path.join(ROOT, "openclaw.plugin.json");
 const MARKETPLACE_PATH = path.join(ROOT, ".claude-plugin", "marketplace.json");
 const RELEASED_BRANCH = "main";
 const RELEASE_STAGE_PATHS = [
   "package.json",
   "package-lock.json",
+  "index.ts",
   "openclaw.plugin.json",
   ".claude-plugin/marketplace.json",
   `marketplace/${PLUGIN_ID}`,
@@ -177,6 +179,14 @@ function syncVersions(currentVersion, nextVersion, dryRun) {
   }
   pluginManifest.version = nextVersion;
   marketplace.version = nextVersion;
+  const indexSource = fs.readFileSync(INDEX_TS_PATH, "utf8");
+  const nextIndexSource = indexSource.replace(
+    /version:\s*"[^"]+"/,
+    `version: "${nextVersion}"`,
+  );
+  if (nextIndexSource === indexSource && !indexSource.includes(`version: "${nextVersion}"`)) {
+    fail("Unable to update plugin entrypoint version in index.ts.");
+  }
   if (Array.isArray(marketplace.plugins)) {
     for (const plugin of marketplace.plugins) {
       if (plugin?.name === PLUGIN_ID) {
@@ -190,6 +200,7 @@ function syncVersions(currentVersion, nextVersion, dryRun) {
   }
   writeJson(PACKAGE_JSON_PATH, packageJson);
   writeJson(PACKAGE_LOCK_PATH, packageLock);
+  fs.writeFileSync(INDEX_TS_PATH, nextIndexSource);
   writeJson(OPENCLAW_PLUGIN_PATH, pluginManifest);
   writeJson(MARKETPLACE_PATH, marketplace);
 }
