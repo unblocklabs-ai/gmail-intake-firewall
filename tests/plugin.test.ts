@@ -560,6 +560,11 @@ test("plugin doctor and support bundle expose redacted operator diagnostics", as
   assert.match(findingMessages, /resolved OAuth scopes do not allow Gmail modify/);
   const serializedBundle = JSON.stringify(supportBundle);
   assert.match(serializedBundle, /Support bundle is redacted/);
+  const supportAuth = supportBundle.auth as { sources?: Array<Record<string, unknown>> };
+  const supportAuthSource = supportAuth.sources?.[0];
+  assert.equal(supportAuthSource?.hasAccessToken, false);
+  assert.equal(supportAuthSource?.hasRefreshToken, true);
+  assert.equal(supportAuthSource?.hasClientSecret, true);
   assert.doesNotMatch(serializedBundle, /refresh-token/);
   assert.doesNotMatch(serializedBundle, /client-secret/);
   assert.doesNotMatch(serializedBundle, /test-key/);

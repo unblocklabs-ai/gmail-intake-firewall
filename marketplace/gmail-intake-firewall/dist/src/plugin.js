@@ -1079,7 +1079,7 @@ function redactSupportStatus(value) {
     }
     const result = {};
     for (const [key, entry] of Object.entries(raw)) {
-        if (/token|secret|api[_-]?key|authorization/i.test(key)) {
+        if (isSensitiveValueKey(key) && (typeof entry === "string" || objectValue(entry) || Array.isArray(entry))) {
             result[key] = "[redacted]";
         }
         else {
@@ -1087,6 +1087,9 @@ function redactSupportStatus(value) {
         }
     }
     return result;
+}
+function isSensitiveValueKey(key) {
+    return /^(access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|api[_-]?key|authorization)$/i.test(key);
 }
 function redactSecretString(value) {
     return value
