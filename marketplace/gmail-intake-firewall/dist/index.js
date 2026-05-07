@@ -2,7 +2,7 @@ import { registerGmailIntakeFirewallPlugin } from "./src/plugin.js";
 export default {
     id: "gmail-intake-firewall",
     name: "Gmail Intake Firewall",
-    version: "0.1.9",
+    version: "0.1.10",
     register(api) {
         registerGmailIntakeFirewallPlugin(api);
     },
