@@ -52,7 +52,9 @@ export function buildQuarantineActions(
 export type ActionExecutorDeps = {
   gmail?: {
     applyLabel(messageId: string, label: string): Promise<void>;
+    removeLabel?(messageId: string, label: string): Promise<void>;
     archive(messageId: string): Promise<void>;
+    restoreInbox?(messageId: string): Promise<void>;
   };
   slack?: {
     postAlert(target: string | undefined, summary: string, payload: Record<string, unknown> | undefined): Promise<void>;
@@ -96,11 +98,21 @@ export async function executePlannedActions(
           throw new Error("Gmail action executor is not configured");
         }
         await deps.gmail.applyLabel(action.messageId, action.label);
+      } else if (action.type === "gmail_remove_label") {
+        if (!deps.gmail?.removeLabel) {
+          throw new Error("Gmail label removal executor is not configured");
+        }
+        await deps.gmail.removeLabel(action.messageId, action.label);
       } else if (action.type === "gmail_archive") {
         if (!deps.gmail) {
           throw new Error("Gmail action executor is not configured");
         }
         await deps.gmail.archive(action.messageId);
+      } else if (action.type === "gmail_restore_inbox") {
+        if (!deps.gmail?.restoreInbox) {
+          throw new Error("Gmail inbox restore executor is not configured");
+        }
+        await deps.gmail.restoreInbox(action.messageId);
       } else if (action.type === "human_alert" && action.sink === "slack") {
         if (!deps.slack) {
           throw new Error("Slack alert executor is not configured");
@@ -139,7 +151,9 @@ export function requiredActionsSucceeded(results: ActionExecutionStatus[]): bool
 
 function isRequiredExecutableAction(action: PlannedAction): boolean {
   return action.type === "gmail_label"
+    || action.type === "gmail_remove_label"
     || action.type === "gmail_archive"
+    || action.type === "gmail_restore_inbox"
     || action.type === "human_alert"
     || action.type === "agent_wake";
 }

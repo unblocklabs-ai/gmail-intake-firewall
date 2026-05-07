@@ -165,7 +165,25 @@ function buildReviewTool(service) {
         properties: {
             operation: {
                 type: "string",
-                enum: ["listQuarantine", "getQuarantineItem", "recordFeedback", "markHarmful", "wakeNow", "muteSender", "alwaysAggregate"],
+                enum: [
+                    "listQuarantine",
+                    "getQuarantineItem",
+                    "recordFeedback",
+                    "markHarmful",
+                    "wakeNow",
+                    "releaseFromQuarantine",
+                    "replayWithFeedback",
+                    "muteSender",
+                    "unmuteSender",
+                    "alwaysAggregate",
+                    "removeAlwaysAggregate",
+                    "muteDomain",
+                    "unmuteDomain",
+                    "alwaysAggregateDomain",
+                    "removeAlwaysAggregateDomain",
+                    "listPreferences",
+                    "reviewSummary",
+                ],
             },
             sourceId: { type: "string" },
             messageId: { type: "string" },
@@ -173,8 +191,11 @@ function buildReviewTool(service) {
             reason: { type: "string" },
             feedbackType: { type: "string" },
             sender: { type: "string" },
+            domain: { type: "string" },
             wakeTarget: { type: "string" },
             limit: { type: "number" },
+            restoreInbox: { type: "boolean" },
+            force: { type: "boolean" },
             dryRun: { type: "boolean" },
         },
         required: ["operation"],
@@ -183,7 +204,20 @@ function buildReviewTool(service) {
         const normalizedInput = normalizeToolInput(input);
         const operation = typeof normalizedInput?.operation === "string" ? normalizedInput.operation : undefined;
         if (operation === "listQuarantine") {
-            return service.listQuarantine({ limit: numberInput(normalizedInput?.limit, 25) });
+            return service.listQuarantine({
+                limit: numberInput(normalizedInput?.limit, 25),
+                ...(typeof normalizedInput?.sourceId === "string" ? { sourceId: normalizedInput.sourceId } : {}),
+            });
+        }
+        if (operation === "listPreferences") {
+            return service.listPreferences({
+                ...(typeof normalizedInput?.sourceId === "string" ? { sourceId: normalizedInput.sourceId } : {}),
+            });
+        }
+        if (operation === "reviewSummary") {
+            return service.reviewSummary({
+                ...(typeof normalizedInput?.sourceId === "string" ? { sourceId: normalizedInput.sourceId } : {}),
+            });
         }
         const sourceId = typeof normalizedInput?.sourceId === "string" ? normalizedInput.sourceId : undefined;
         const messageId = typeof normalizedInput?.messageId === "string" ? normalizedInput.messageId : undefined;
@@ -196,6 +230,7 @@ function buildReviewTool(service) {
             ...(typeof normalizedInput?.actor === "string" ? { actor: normalizedInput.actor } : {}),
             ...(typeof normalizedInput?.reason === "string" ? { reason: normalizedInput.reason } : {}),
             ...(typeof normalizedInput?.sender === "string" ? { sender: normalizedInput.sender } : {}),
+            ...(typeof normalizedInput?.domain === "string" ? { domain: normalizedInput.domain } : {}),
         };
         if (operation === "getQuarantineItem") {
             return service.getQuarantineItem({ sourceId, messageId });
@@ -206,13 +241,46 @@ function buildReviewTool(service) {
         if (operation === "muteSender") {
             return service.recordReviewFeedback({ ...common, feedbackType: "mute_sender" });
         }
+        if (operation === "unmuteSender") {
+            return service.recordReviewFeedback({ ...common, feedbackType: "unmute_sender" });
+        }
         if (operation === "alwaysAggregate") {
             return service.recordReviewFeedback({ ...common, feedbackType: "always_aggregate" });
+        }
+        if (operation === "removeAlwaysAggregate") {
+            return service.recordReviewFeedback({ ...common, feedbackType: "remove_always_aggregate" });
+        }
+        if (operation === "muteDomain") {
+            return service.recordReviewFeedback({ ...common, feedbackType: "mute_domain" });
+        }
+        if (operation === "unmuteDomain") {
+            return service.recordReviewFeedback({ ...common, feedbackType: "unmute_domain" });
+        }
+        if (operation === "alwaysAggregateDomain") {
+            return service.recordReviewFeedback({ ...common, feedbackType: "always_aggregate_domain" });
+        }
+        if (operation === "removeAlwaysAggregateDomain") {
+            return service.recordReviewFeedback({ ...common, feedbackType: "remove_always_aggregate_domain" });
         }
         if (operation === "wakeNow") {
             return service.wakeReviewedMessage({
                 ...common,
                 ...(typeof normalizedInput?.wakeTarget === "string" ? { wakeTarget: normalizedInput.wakeTarget } : {}),
+                ...(typeof normalizedInput?.dryRun === "boolean" ? { dryRun: normalizedInput.dryRun } : {}),
+            });
+        }
+        if (operation === "releaseFromQuarantine") {
+            return service.releaseFromQuarantine({
+                ...common,
+                ...(typeof normalizedInput?.restoreInbox === "boolean" ? { restoreInbox: normalizedInput.restoreInbox } : {}),
+                ...(typeof normalizedInput?.dryRun === "boolean" ? { dryRun: normalizedInput.dryRun } : {}),
+            });
+        }
+        if (operation === "replayWithFeedback") {
+            return service.replayWithFeedback({
+                ...common,
+                ...(typeof normalizedInput?.feedbackType === "string" ? { feedbackType: normalizedInput.feedbackType } : {}),
+                ...(typeof normalizedInput?.force === "boolean" ? { force: normalizedInput.force } : {}),
                 ...(typeof normalizedInput?.dryRun === "boolean" ? { dryRun: normalizedInput.dryRun } : {}),
             });
         }
@@ -500,7 +568,27 @@ function buildGmailIntakeFirewallService(config, host, logger) {
             return {
                 ok: true,
                 service: "gmail-intake-firewall-service",
-                ...runtime.listQuarantine(numberInput(options.limit, 25)),
+                ...runtime.listQuarantine(numberInput(options.limit, 25), typeof options.sourceId === "string" ? options.sourceId : undefined),
+            };
+        },
+        async listPreferences(options) {
+            if (!runtime) {
+                throw new Error("gmail-intake-firewall service is not started");
+            }
+            return {
+                ok: true,
+                service: "gmail-intake-firewall-service",
+                ...runtime.listPreferences(typeof options.sourceId === "string" ? options.sourceId : undefined),
+            };
+        },
+        async reviewSummary(options) {
+            if (!runtime) {
+                throw new Error("gmail-intake-firewall service is not started");
+            }
+            return {
+                ok: true,
+                service: "gmail-intake-firewall-service",
+                stats: runtime.reviewSummary(typeof options.sourceId === "string" ? options.sourceId : undefined),
             };
         },
         async getQuarantineItem(options) {
@@ -538,6 +626,7 @@ function buildGmailIntakeFirewallService(config, host, logger) {
                     ...(typeof event.actor === "string" ? { actor: event.actor } : {}),
                     ...(typeof event.reason === "string" ? { reason: event.reason } : {}),
                     ...(typeof event.sender === "string" ? { sender: event.sender } : {}),
+                    ...(typeof event.domain === "string" ? { domain: event.domain } : {}),
                 }),
             };
         },
@@ -559,6 +648,51 @@ function buildGmailIntakeFirewallService(config, host, logger) {
                     ...(typeof event.actor === "string" ? { actor: event.actor } : {}),
                     ...(typeof event.reason === "string" ? { reason: event.reason } : {}),
                     ...(typeof event.wakeTarget === "string" ? { wakeTarget: event.wakeTarget } : {}),
+                    ...(typeof event.dryRun === "boolean" ? { dryRun: event.dryRun } : {}),
+                }),
+            };
+        },
+        async releaseFromQuarantine(event) {
+            if (!runtime) {
+                throw new Error("gmail-intake-firewall service is not started");
+            }
+            const sourceId = typeof event.sourceId === "string" ? event.sourceId : undefined;
+            const messageId = typeof event.messageId === "string" ? event.messageId : undefined;
+            if (!sourceId || !messageId) {
+                throw new Error("releaseFromQuarantine requires sourceId and messageId");
+            }
+            return {
+                ok: true,
+                service: "gmail-intake-firewall-service",
+                ...await runtime.releaseFromQuarantine({
+                    sourceId,
+                    messageId,
+                    ...(typeof event.actor === "string" ? { actor: event.actor } : {}),
+                    ...(typeof event.reason === "string" ? { reason: event.reason } : {}),
+                    ...(typeof event.restoreInbox === "boolean" ? { restoreInbox: event.restoreInbox } : {}),
+                    ...(typeof event.dryRun === "boolean" ? { dryRun: event.dryRun } : {}),
+                }),
+            };
+        },
+        async replayWithFeedback(event) {
+            if (!runtime) {
+                throw new Error("gmail-intake-firewall service is not started");
+            }
+            const sourceId = typeof event.sourceId === "string" ? event.sourceId : undefined;
+            const messageId = typeof event.messageId === "string" ? event.messageId : undefined;
+            if (!sourceId || !messageId) {
+                throw new Error("replayWithFeedback requires sourceId and messageId");
+            }
+            return {
+                ok: true,
+                service: "gmail-intake-firewall-service",
+                ...await runtime.replayWithFeedback({
+                    sourceId,
+                    messageId,
+                    ...(typeof event.actor === "string" ? { actor: event.actor } : {}),
+                    ...(typeof event.reason === "string" ? { reason: event.reason } : {}),
+                    ...(typeof event.feedbackType === "string" ? { feedbackType: event.feedbackType } : {}),
+                    ...(typeof event.force === "boolean" ? { force: event.force } : {}),
                     ...(typeof event.dryRun === "boolean" ? { dryRun: event.dryRun } : {}),
                 }),
             };

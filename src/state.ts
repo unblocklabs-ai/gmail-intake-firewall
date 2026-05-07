@@ -94,7 +94,8 @@ export type SqliteStateStore = {
   listFeedbackEvents(limit?: number): Array<Record<string, unknown>>;
   listFeedbackForMessage(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
   listRoutingPreferences(sourceId?: string): RoutingPreference[];
-  listQuarantine(limit?: number): Array<Record<string, unknown>>;
+  getReviewStats(sourceId?: string): Record<string, unknown>;
+  listQuarantine(limit?: number, sourceId?: string): Array<Record<string, unknown>>;
   listEvents(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
   findLatestEvent(sourceId: string, messageId: string): IntakeEvent | undefined;
   listDecisions(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
@@ -300,37 +301,46 @@ export function openSqliteStateStore(path: string): SqliteStateStore {
       );
     },
     listFeedbackEvents(limit = 100): Array<Record<string, unknown>> {
-      return db.prepare(
+      const rows = db.prepare(
         `SELECT id, created_at, source_id, message_id, thread_id, feedback_type, payload_json
          FROM feedback_events
-         ORDER BY created_at DESC
+         ORDER BY created_at DESC, id DESC
          LIMIT ?`,
-      ).all?.(limit).map((row) => normalizeFeedbackRow(row as Record<string, unknown>)) ?? [];
+      ).all?.(limit) ?? [];
+      return rows.map((row) => normalizeFeedbackRow(row as Record<string, unknown>));
     },
     listFeedbackForMessage(sourceId: string, messageId: string, limit = 100): Array<Record<string, unknown>> {
-      return db.prepare(
+      const rows = db.prepare(
         `SELECT id, created_at, source_id, message_id, thread_id, feedback_type, payload_json
          FROM feedback_events
          WHERE source_id = ? AND message_id = ?
-         ORDER BY created_at DESC
+         ORDER BY created_at DESC, id DESC
          LIMIT ?`,
-      ).all?.(sourceId, messageId, limit).map((row) => normalizeFeedbackRow(row as Record<string, unknown>)) ?? [];
+      ).all?.(sourceId, messageId, limit) ?? [];
+      return rows.map((row) => normalizeFeedbackRow(row as Record<string, unknown>));
     },
     listRoutingPreferences(sourceId?: string): RoutingPreference[] {
       const rows = sourceId
         ? db.prepare(
           `SELECT payload_json
            FROM feedback_events
-           WHERE source_id = ? AND feedback_type IN ('mute_sender', 'always_aggregate')
-           ORDER BY created_at DESC`,
+           WHERE source_id = ? AND feedback_type IN (
+             'mute_sender', 'always_aggregate', 'unmute_sender', 'remove_always_aggregate',
+             'mute_domain', 'always_aggregate_domain', 'unmute_domain', 'remove_always_aggregate_domain'
+           )
+           ORDER BY created_at DESC, id DESC`,
         ).all?.(sourceId) ?? []
         : db.prepare(
           `SELECT payload_json
            FROM feedback_events
-           WHERE feedback_type IN ('mute_sender', 'always_aggregate')
-           ORDER BY created_at DESC`,
+           WHERE feedback_type IN (
+             'mute_sender', 'always_aggregate', 'unmute_sender', 'remove_always_aggregate',
+             'mute_domain', 'always_aggregate_domain', 'unmute_domain', 'remove_always_aggregate_domain'
+           )
+           ORDER BY created_at DESC, id DESC`,
         ).all?.() ?? [];
       const preferences = new Map<string, RoutingPreference>();
+      const removals = new Set<string>();
       for (const row of rows) {
         const payload = parseJson((row as Record<string, unknown>).payload_json);
         if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
@@ -338,20 +348,40 @@ export function openSqliteStateStore(path: string): SqliteStateStore {
         }
         const raw = payload as Record<string, unknown>;
         const prefSourceId = typeof raw.sourceId === "string" ? raw.sourceId : undefined;
-        const sender = typeof raw.sender === "string" ? raw.sender.toLowerCase() : undefined;
         const feedbackType = raw.feedbackType;
-        if (!prefSourceId || !sender || (feedbackType !== "mute_sender" && feedbackType !== "always_aggregate")) {
+        const scope = feedbackType === "mute_domain" || feedbackType === "always_aggregate_domain" ||
+          feedbackType === "unmute_domain" || feedbackType === "remove_always_aggregate_domain"
+          ? "domain"
+          : "sender";
+        const value = scope === "domain"
+          ? (typeof raw.domain === "string" ? raw.domain.toLowerCase() : undefined)
+          : (typeof raw.sender === "string" ? raw.sender.toLowerCase() : undefined);
+        const preferenceType = feedbackType === "mute_sender" || feedbackType === "mute_domain"
+          ? "mute"
+          : feedbackType === "always_aggregate" || feedbackType === "always_aggregate_domain"
+            ? "always_aggregate"
+            : undefined;
+        const removedType = feedbackType === "unmute_sender" || feedbackType === "unmute_domain"
+          ? "mute"
+          : feedbackType === "remove_always_aggregate" || feedbackType === "remove_always_aggregate_domain"
+            ? "always_aggregate"
+            : undefined;
+        if (!prefSourceId || !value || (!preferenceType && !removedType)) {
           continue;
         }
-        const type = feedbackType === "mute_sender" ? "mute_sender" : "always_aggregate_sender";
-        const key = `${prefSourceId}:${sender}`;
-        if (preferences.has(key)) {
+        const key = `${prefSourceId}:${scope}:${value}:${preferenceType ?? removedType}`;
+        if (removals.has(key) || preferences.has(key)) {
+          continue;
+        }
+        if (removedType) {
+          removals.add(key);
           continue;
         }
         const preference: RoutingPreference = {
-          type,
+          type: preferenceType!,
+          scope,
           sourceId: prefSourceId,
-          sender,
+          value,
           createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date(0).toISOString(),
         };
         if (typeof raw.actor === "string") {
@@ -364,15 +394,56 @@ export function openSqliteStateStore(path: string): SqliteStateStore {
       }
       return [...preferences.values()];
     },
-    listQuarantine(limit = 25): Array<Record<string, unknown>> {
-      const rows = db.prepare(
-        `SELECT id, processed_at, source_id, account_email, message_id, thread_id,
-          security_json, routing_json, actions_json, dry_run
+    getReviewStats(sourceId?: string): Record<string, unknown> {
+      const sourceClause = sourceId ? "AND source_id = ?" : "";
+      const args = sourceId ? [sourceId] : [];
+      const quarantine = db.prepare(
+        `SELECT COUNT(DISTINCT source_id || ':' || message_id) AS count
          FROM decisions
-         WHERE routing_json IS NULL
-         ORDER BY id DESC
-         LIMIT ?`,
-      ).all?.(limit) ?? [];
+         WHERE routing_json IS NULL ${sourceClause}`,
+      ).get?.(...args) as Record<string, unknown> | undefined;
+      const reviewed = db.prepare(
+        `SELECT COUNT(DISTINCT source_id || ':' || message_id) AS count
+         FROM feedback_events
+         WHERE message_id IS NOT NULL ${sourceClause}`,
+      ).get?.(...args) as Record<string, unknown> | undefined;
+      const harmful = db.prepare(
+        `SELECT COUNT(DISTINCT source_id || ':' || message_id) AS count
+         FROM feedback_events
+         WHERE feedback_type = 'harmful' ${sourceClause}`,
+      ).get?.(...args) as Record<string, unknown> | undefined;
+      const safe = db.prepare(
+        `SELECT COUNT(DISTINCT source_id || ':' || message_id) AS count
+         FROM feedback_events
+         WHERE feedback_type IN ('safe', 'release_from_quarantine', 'wake_now') ${sourceClause}`,
+      ).get?.(...args) as Record<string, unknown> | undefined;
+      const pending = Math.max(0, numberValue(quarantine?.count) - numberValue(reviewed?.count));
+      return {
+        quarantined: numberValue(quarantine?.count),
+        reviewed: numberValue(reviewed?.count),
+        pendingReview: pending,
+        markedHarmful: numberValue(harmful?.count),
+        markedSafe: numberValue(safe?.count),
+      };
+    },
+    listQuarantine(limit = 25, sourceId?: string): Array<Record<string, unknown>> {
+      const rows = sourceId
+        ? db.prepare(
+          `SELECT id, processed_at, source_id, account_email, message_id, thread_id,
+            security_json, routing_json, actions_json, dry_run
+           FROM decisions
+           WHERE routing_json IS NULL AND source_id = ?
+           ORDER BY id DESC
+           LIMIT ?`,
+        ).all?.(sourceId, limit) ?? []
+        : db.prepare(
+          `SELECT id, processed_at, source_id, account_email, message_id, thread_id,
+            security_json, routing_json, actions_json, dry_run
+           FROM decisions
+           WHERE routing_json IS NULL
+           ORDER BY id DESC
+           LIMIT ?`,
+        ).all?.(limit) ?? [];
       return rows.map((row) => normalizeDecisionRow(row as Record<string, unknown>));
     },
     listEvents(sourceId: string, messageId: string, limit = 25): Array<Record<string, unknown>> {

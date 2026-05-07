@@ -26,7 +26,9 @@ export type GmailClient = {
     fetchMessage(candidate: GmailCandidate): Promise<InboundMessage>;
     fetchThreadContext?(threadId: string, maxMessages?: number): Promise<import("./types.js").GmailThreadContext | undefined>;
     applyLabel(messageId: string, label: string): Promise<void>;
+    removeLabel?(messageId: string, label: string): Promise<void>;
     archive(messageId: string): Promise<void>;
+    restoreInbox?(messageId: string): Promise<void>;
 };
 export declare function candidateToIntakeEvent(source: GmailSourceConfig, candidate: GmailCandidate, observedAt?: Date): IntakeEvent;
 export declare function buildCandidateQuery(source: GmailSourceConfig): string | undefined;

@@ -84,9 +84,10 @@ export type PluginConfig = {
     };
 };
 export type RoutingPreference = {
-    type: "mute_sender" | "always_aggregate_sender";
+    type: "mute" | "always_aggregate";
+    scope: "sender" | "domain";
     sourceId: string;
-    sender: string;
+    value: string;
     createdAt: string;
     actor?: string;
     reason?: string;
@@ -177,7 +178,14 @@ export type PlannedAction = {
     label: string;
     messageId: string;
 } | {
+    type: "gmail_remove_label";
+    label: string;
+    messageId: string;
+} | {
     type: "gmail_archive";
+    messageId: string;
+} | {
+    type: "gmail_restore_inbox";
     messageId: string;
 } | {
     type: "human_alert";

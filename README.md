@@ -98,10 +98,35 @@ Service methods:
 Review tool:
 
 - `gmail_intake_firewall_status` is read-only status/probe/config/auth inspection.
-- `gmail_intake_firewall_review` is the write-capable text review tool. Supported operations: `listQuarantine`, `getQuarantineItem`, `recordFeedback`, `markHarmful`, `wakeNow`, `muteSender`, and `alwaysAggregate`.
+- `gmail_intake_firewall_review` is the write-capable text review tool. Supported operations: `listQuarantine`, `getQuarantineItem`, `reviewSummary`, `recordFeedback`, `markHarmful`, `releaseFromQuarantine`, `replayWithFeedback`, `wakeNow`, `muteSender`, `unmuteSender`, `alwaysAggregate`, `removeAlwaysAggregate`, `muteDomain`, `unmuteDomain`, `alwaysAggregateDomain`, `removeAlwaysAggregateDomain`, and `listPreferences`.
 - Review payloads are safe by default: metadata, auth headers, link domains, attachment metadata, risk reasons, sanitized summary, action history, and feedback history. They do not include full raw body, raw HTML, or attachment contents.
-- `muteSender` and `alwaysAggregate` create sender preferences that affect future safe routing only. They do not override the security classifier or release risky mail from quarantine.
-- `wakeNow` creates a sanitized detached wake from the reviewed decision. It does not include raw suspicious body or attachments.
+- `muteSender`, `alwaysAggregate`, and their domain variants create preferences that affect future safe routing only. They do not override the security classifier or release risky mail from quarantine. Use `unmuteSender`, `removeAlwaysAggregate`, and the matching domain removals to clear active preferences.
+- `releaseFromQuarantine` can remove the configured quarantine label and optionally restore `INBOX` after a human marks an item safe. Gmail mutation still requires source Gmail actions to be enabled and `hasModifyScope: true`; dry-run returns the intended Gmail actions without applying them.
+- `replayWithFeedback` records the human decision and replays the latest stored intake event with `force: true` by default, so a reviewed-safe message can run through security/router policy again and produce the normal label/aggregate/wake behavior.
+- `wakeNow` creates a sanitized detached wake from the reviewed decision. It requires an explicit `wakeTarget` for reviewed quarantines and does not include raw suspicious body or attachments.
+
+Agent-facing quarantine review prompt:
+
+```text
+You are reviewing a quarantined Gmail item through gmail-intake-firewall.
+
+1. Call gmail_intake_firewall_review with operation=listQuarantine or reviewSummary to find pending items.
+2. For a selected item, call operation=getQuarantineItem with sourceId and messageId.
+3. Show the human only safe fields: sender, reply-to, recipients, subject, date, Gmail link, labels, SPF/DKIM/DMARC/auth headers, link domains, attachment metadata, risk reasons, suspicious signals, sanitized summary, and prior feedback/action status. Do not ask for or display raw body, raw HTML, snippet, or attachment contents.
+4. Ask a concise text question such as:
+   "This email was quarantined as possible phishing. Do you want me to mark it harmful, release it as safe, wake an agent with a sanitized summary, mute this sender, always aggregate this sender, or leave it quarantined?"
+5. Map the human's answer to review operations:
+   - harmful/scam/phishing -> markHarmful
+   - safe/release -> releaseFromQuarantine, optionally restoreInbox=true
+   - safe and route normally -> replayWithFeedback with feedbackType=safe
+   - wake agent -> wakeNow with an explicit wakeTarget
+   - mute sender -> muteSender
+   - unmute sender -> unmuteSender
+   - always aggregate sender -> alwaysAggregate
+   - remove always aggregate -> removeAlwaysAggregate
+   - domain-level preferences -> use the matching Domain operation only when the human clearly asks for all mail from that domain
+6. After any operation, summarize what changed and include sourceId/messageId for auditability.
+```
 
 Example policy skeleton:
 

@@ -3,7 +3,9 @@ export declare function buildQuarantineActions(message: InboundMessage, classifi
 export type ActionExecutorDeps = {
     gmail?: {
         applyLabel(messageId: string, label: string): Promise<void>;
+        removeLabel?(messageId: string, label: string): Promise<void>;
         archive(messageId: string): Promise<void>;
+        restoreInbox?(messageId: string): Promise<void>;
     };
     slack?: {
         postAlert(target: string | undefined, summary: string, payload: Record<string, unknown> | undefined): Promise<void>;

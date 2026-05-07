@@ -59,7 +59,9 @@ export declare class GmailIntakePollingRuntime {
     probe(): Record<string, unknown>;
     status(): Record<string, unknown>;
     inspectMessage(sourceId: string, messageId: string): Record<string, unknown>;
-    listQuarantine(limit?: number): Record<string, unknown>;
+    listQuarantine(limit?: number, sourceId?: string): Record<string, unknown>;
+    listPreferences(sourceId?: string): Record<string, unknown>;
+    reviewSummary(sourceId?: string): Record<string, unknown>;
     getQuarantineItem(sourceId: string, messageId: string): Record<string, unknown>;
     recordReviewFeedback(input: {
         sourceId: string;
@@ -68,6 +70,7 @@ export declare class GmailIntakePollingRuntime {
         actor?: string;
         reason?: string;
         sender?: string;
+        domain?: string;
     }): Record<string, unknown>;
     wakeReviewedMessage(input: {
         sourceId: string;
@@ -76,6 +79,19 @@ export declare class GmailIntakePollingRuntime {
         reason?: string;
         wakeTarget?: string;
         dryRun?: boolean;
+    }): Promise<Record<string, unknown>>;
+    releaseFromQuarantine(input: {
+        sourceId: string;
+        messageId: string;
+        actor?: string;
+        reason?: string;
+        restoreInbox?: boolean;
+        dryRun?: boolean;
+    }): Promise<Record<string, unknown>>;
+    replayWithFeedback(input: ReplayOptions & {
+        actor?: string;
+        reason?: string;
+        feedbackType?: string;
     }): Promise<Record<string, unknown>>;
     replayEvent(options: ReplayOptions): Promise<PollingRunSummary>;
     handleGmailNotification(options: GmailNotificationOptions): Promise<PollingRunSummary>;

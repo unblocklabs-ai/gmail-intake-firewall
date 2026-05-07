@@ -149,11 +149,29 @@ export function createGmailClientFromApi(source, api) {
                 requestBody: { addLabelIds: [labelId] },
             }));
         },
+        async removeLabel(messageId, label) {
+            const labelId = await labels.resolveExisting(label);
+            if (!labelId) {
+                return;
+            }
+            await withGmailRetry(() => api.users.messages.modify({
+                userId: "me",
+                id: messageId,
+                requestBody: { removeLabelIds: [labelId] },
+            }));
+        },
         async archive(messageId) {
             await withGmailRetry(() => api.users.messages.modify({
                 userId: "me",
                 id: messageId,
                 requestBody: { removeLabelIds: ["INBOX"] },
+            }));
+        },
+        async restoreInbox(messageId) {
+            await withGmailRetry(() => api.users.messages.modify({
+                userId: "me",
+                id: messageId,
+                requestBody: { addLabelIds: ["INBOX"] },
             }));
         },
     };
@@ -293,6 +311,10 @@ class GmailLabelResolver {
         labels.set(label, id);
         labels.set(label.toLowerCase(), id);
         return id;
+    }
+    async resolveExisting(label) {
+        const labels = await this.getLabels();
+        return labels.get(label) ?? labels.get(label.toLowerCase());
     }
     async getLabels() {
         if (this.cache) {

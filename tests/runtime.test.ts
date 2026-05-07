@@ -184,6 +184,223 @@ test("runtime quarantine review returns safe payload and records text feedback",
   assert.equal(events[0]?.feedbackType, "mute_sender");
 });
 
+test("runtime review operations stay isolated by source", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [
+      { id: "primary", accountEmail: "primary@example.com" },
+      { id: "secondary", accountEmail: "secondary@example.com" },
+    ],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: (source) => ({
+      async listCandidates() {
+        return [{ id: "shared-message", threadId: `thread-${source.id}` }];
+      },
+      async fetchMessage(candidate) {
+        return {
+          ...message(candidate.id),
+          sourceId: source.id,
+          accountEmail: source.accountEmail,
+          threadId: `thread-${source.id}`,
+          from: `${source.id}@example.com`,
+        };
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    securityClassifier: {
+      classify: async () => ({
+        verdict: "risky",
+        riskScore: 0.9,
+        categories: ["prompt_injection"],
+        reasons: ["instruction override"],
+        safeSummary: "Suspicious instruction override.",
+        suspiciousSignals: ["ignore previous instructions"],
+      }),
+    },
+  });
+
+  await runtime.runOnce();
+  runtime.recordReviewFeedback({
+    sourceId: "primary",
+    messageId: "shared-message",
+    feedbackType: "mute_sender",
+    actor: "bill",
+  });
+
+  const primary = runtime.getQuarantineItem("primary", "shared-message").item as Record<string, unknown>;
+  const secondary = runtime.getQuarantineItem("secondary", "shared-message").item as Record<string, unknown>;
+  assert.equal((primary.feedback as Array<Record<string, unknown>>).length, 1);
+  assert.equal((secondary.feedback as Array<Record<string, unknown>>).length, 0);
+  assert.equal((runtime.listQuarantine(10, "primary").items as unknown[]).length, 1);
+  assert.equal((runtime.listQuarantine(10, "secondary").items as unknown[]).length, 1);
+  assert.deepEqual(runtime.listPreferences("secondary"), { preferences: [] });
+});
+
+test("runtime review preferences can be listed and removed", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        return [{ id: "msg-review", threadId: "thread-review" }];
+      },
+      async fetchMessage(candidate) {
+        return message(candidate.id);
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    securityClassifier: {
+      classify: async () => ({
+        verdict: "risky",
+        riskScore: 0.9,
+        categories: ["phishing"],
+        reasons: ["credential theft"],
+        safeSummary: "Suspicious login request.",
+        suspiciousSignals: ["fake login"],
+      }),
+    },
+  });
+
+  await runtime.runOnce();
+  runtime.recordReviewFeedback({ sourceId: "primary", messageId: "msg-review", feedbackType: "mute_sender" });
+  runtime.recordReviewFeedback({ sourceId: "primary", messageId: "msg-review", feedbackType: "always_aggregate" });
+  assert.deepEqual((runtime.listPreferences("primary").preferences as Array<Record<string, unknown>>).map((pref) => pref.type).sort(), [
+    "always_aggregate",
+    "mute",
+  ]);
+
+  runtime.recordReviewFeedback({ sourceId: "primary", messageId: "msg-review", feedbackType: "unmute_sender" });
+  runtime.recordReviewFeedback({ sourceId: "primary", messageId: "msg-review", feedbackType: "remove_always_aggregate" });
+  assert.deepEqual(runtime.listPreferences("primary"), { preferences: [] });
+});
+
+test("runtime review wake requires explicit target and release can plan Gmail restore", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+    wakeTargets: [{ id: "agent:dev", agentId: "dev-agent" }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        return [{ id: "msg-review", threadId: "thread-review" }];
+      },
+      async fetchMessage(candidate) {
+        return message(candidate.id);
+      },
+      async applyLabel() {},
+      async removeLabel() {},
+      async archive() {},
+      async restoreInbox() {},
+    }),
+    securityClassifier: {
+      classify: async () => ({
+        verdict: "risky",
+        riskScore: 0.9,
+        categories: ["phishing"],
+        reasons: ["credential theft"],
+        safeSummary: "Suspicious login request.",
+        suspiciousSignals: ["fake login"],
+      }),
+    },
+    actionDeps: {
+      wake: {
+        async startDetachedAgentTurn() {},
+      },
+    },
+  });
+
+  await runtime.runOnce();
+  const wakeWithoutTarget = await runtime.wakeReviewedMessage({ sourceId: "primary", messageId: "msg-review" });
+  assert.equal(wakeWithoutTarget.executed, false);
+  assert.match(String(wakeWithoutTarget.error), /wakeTarget is required/);
+
+  const release = await runtime.releaseFromQuarantine({
+    sourceId: "primary",
+    messageId: "msg-review",
+    restoreInbox: true,
+  });
+  assert.equal(release.found, true);
+  assert.deepEqual((release.actionResults as Array<Record<string, unknown>>).map((result) => (result.action as Record<string, unknown>).type), [
+    "gmail_remove_label",
+    "gmail_restore_inbox",
+  ]);
+  assert.deepEqual((release.actionResults as Array<Record<string, unknown>>).map((result) => result.status), [
+    "skipped_dry_run",
+    "skipped_dry_run",
+  ]);
+});
+
+test("runtime replayWithFeedback records safe feedback and replays with force", async (t) => {
+  const stateStore = await tempStore(t);
+  let fetchCount = 0;
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+    tags: [{ id: "client-dev", description: "Client dev", wakeMode: "none" }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        return [{ id: "msg-review", threadId: "thread-review" }];
+      },
+      async fetchMessage(candidate) {
+        fetchCount += 1;
+        return message(candidate.id);
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    securityClassifier: {
+      classify: async () => fetchCount === 1 ? {
+        verdict: "risky",
+        riskScore: 0.9,
+        categories: ["phishing"],
+        reasons: ["credential theft"],
+        safeSummary: "Suspicious login request.",
+        suspiciousSignals: ["fake login"],
+      } : safeSecurity,
+    },
+    routerClassifier: {
+      classify: async () => ({
+        tags: ["client-dev"],
+        wakeMode: "none",
+        sanitizedSummary: "Safe after review.",
+        reasons: ["human marked safe"],
+      }),
+    },
+  });
+
+  await runtime.runOnce();
+  const result = await runtime.replayWithFeedback({
+    sourceId: "primary",
+    messageId: "msg-review",
+    actor: "bill",
+    reason: "known sender",
+  });
+
+  assert.equal((result.feedback as Record<string, unknown>).feedbackType, "safe");
+  assert.equal((result.replay as Record<string, unknown>).processed, 1);
+  assert.equal(fetchCount, 2);
+  assert.equal(stateStore.listDecisions("primary", "msg-review", 2)[0]?.routing !== undefined, true);
+});
+
 test("polling runtime skips already processed messages before fetch", async (t) => {
   const stateStore = await tempStore(t);
   const config = resolvePluginConfig({

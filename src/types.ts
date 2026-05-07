@@ -92,9 +92,10 @@ export type PluginConfig = {
 };
 
 export type RoutingPreference = {
-  type: "mute_sender" | "always_aggregate_sender";
+  type: "mute" | "always_aggregate";
+  scope: "sender" | "domain";
   sourceId: string;
-  sender: string;
+  value: string;
   createdAt: string;
   actor?: string;
   reason?: string;
@@ -191,7 +192,9 @@ export type DecisionLogEntry = {
 
 export type PlannedAction =
   | { type: "gmail_label"; label: string; messageId: string }
+  | { type: "gmail_remove_label"; label: string; messageId: string }
   | { type: "gmail_archive"; messageId: string }
+  | { type: "gmail_restore_inbox"; messageId: string }
   | { type: "human_alert"; sink: AlertSinkKind; target?: string; summary: string; payload?: Record<string, unknown> }
   | { type: "local_log"; summary: string; payload?: Record<string, unknown> }
   | { type: "agent_wake"; target?: string; payload: AgentWakePayload }

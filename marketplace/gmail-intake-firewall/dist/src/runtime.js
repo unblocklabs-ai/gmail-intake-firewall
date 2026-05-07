@@ -199,13 +199,22 @@ export class GmailIntakePollingRuntime {
             actionAttempts: this.deps.stateStore.listActionAttempts(sourceId, messageId),
         };
     }
-    listQuarantine(limit = 25) {
+    listQuarantine(limit = 25, sourceId) {
         return {
-            items: this.deps.stateStore.listQuarantine(limit).map((decision) => safeQuarantineItem(decision, {
+            stats: this.deps.stateStore.getReviewStats(sourceId),
+            items: this.deps.stateStore.listQuarantine(limit, sourceId).map((decision) => safeQuarantineItem(decision, {
                 feedback: this.deps.stateStore.listFeedbackForMessage(String(decision.sourceId), String(decision.messageId), 10),
                 compact: true,
             })),
         };
+    }
+    listPreferences(sourceId) {
+        return {
+            preferences: this.deps.stateStore.listRoutingPreferences(sourceId),
+        };
+    }
+    reviewSummary(sourceId) {
+        return this.deps.stateStore.getReviewStats(sourceId);
     }
     getQuarantineItem(sourceId, messageId) {
         const decision = this.deps.stateStore.listDecisions(sourceId, messageId, 1)[0];
@@ -223,6 +232,8 @@ export class GmailIntakePollingRuntime {
     }
     recordReviewFeedback(input) {
         const decision = this.deps.stateStore.listDecisions(input.sourceId, input.messageId, 1)[0];
+        const sender = normalizeEmailAddress(input.sender ?? senderFromDecision(decision));
+        const domain = normalizeDomain(input.domain ?? domainFromSender(sender));
         const event = {
             createdAt: this.now().toISOString(),
             sourceId: input.sourceId,
@@ -231,7 +242,8 @@ export class GmailIntakePollingRuntime {
             feedbackType: input.feedbackType,
             actor: input.actor,
             reason: input.reason,
-            sender: input.sender ?? senderFromDecision(decision),
+            sender,
+            domain,
         };
         this.deps.stateStore.recordFeedback(event);
         return { recorded: true, feedback: event };
@@ -241,9 +253,9 @@ export class GmailIntakePollingRuntime {
         if (!decision) {
             return { found: false, executed: false };
         }
-        const wakeTargetId = input.wakeTarget ?? firstWakeTargetId(this.config);
+        const wakeTargetId = input.wakeTarget;
         if (!wakeTargetId) {
-            return { found: true, executed: false, error: "No wake target is configured." };
+            return { found: true, executed: false, error: "wakeTarget is required for reviewed quarantine wake." };
         }
         const wakeTarget = this.config.wakeTargets.find((target) => target.id === wakeTargetId);
         if (!wakeTarget) {
@@ -274,6 +286,10 @@ export class GmailIntakePollingRuntime {
             payload,
         };
         const actionResults = await executePlannedActions([action], input.dryRun ?? this.config.dryRun, this.deps.actionDeps ?? {});
+        const attemptedAt = this.now().toISOString();
+        for (const actionResult of actionResults) {
+            this.deps.stateStore.recordActionStatus(decision, actionResult, attemptedAt);
+        }
         const feedbackInput = {
             sourceId: input.sourceId,
             messageId: input.messageId,
@@ -291,6 +307,70 @@ export class GmailIntakePollingRuntime {
             executed: actionResults.every((result) => result.status !== "failed"),
             actionResults,
             feedback: feedback.feedback,
+        };
+    }
+    async releaseFromQuarantine(input) {
+        const source = this.config.sources.find((candidate) => candidate.id === input.sourceId);
+        const decision = this.deps.stateStore.listDecisions(input.sourceId, input.messageId, 1)[0];
+        if (!source || !decision || decision.routing) {
+            return { found: false, executed: false };
+        }
+        const actions = [];
+        if (source.gmailActions.enabled && source.gmailActions.hasModifyScope) {
+            actions.push({ type: "gmail_remove_label", label: this.config.security.quarantineLabel, messageId: input.messageId });
+            if (input.restoreInbox) {
+                actions.push({ type: "gmail_restore_inbox", messageId: input.messageId });
+            }
+        }
+        let actionResults = [];
+        if (actions.length > 0) {
+            const client = await this.deps.gmailClientFactory(source);
+            actionResults = await executePlannedActions(actions, input.dryRun ?? this.config.dryRun, {
+                ...(this.deps.actionDeps ?? {}),
+                gmail: this.deps.actionDeps?.gmail ?? client,
+            });
+            const attemptedAt = this.now().toISOString();
+            for (const actionResult of actionResults) {
+                this.deps.stateStore.recordActionStatus(decision, actionResult, attemptedAt);
+            }
+        }
+        const feedbackInput = {
+            sourceId: input.sourceId,
+            messageId: input.messageId,
+            feedbackType: "release_from_quarantine",
+        };
+        if (input.actor) {
+            feedbackInput.actor = input.actor;
+        }
+        if (input.reason) {
+            feedbackInput.reason = input.reason;
+        }
+        const feedback = this.recordReviewFeedback(feedbackInput);
+        return {
+            found: true,
+            executed: actionResults.length === 0 || actionResults.every((result) => result.status !== "failed"),
+            actionResults,
+            feedback: feedback.feedback,
+            gmailMutationConfigured: source.gmailActions.enabled && source.gmailActions.hasModifyScope,
+        };
+    }
+    async replayWithFeedback(input) {
+        const feedback = this.recordReviewFeedback({
+            sourceId: input.sourceId,
+            messageId: input.messageId,
+            feedbackType: input.feedbackType ?? "safe",
+            ...(input.actor ? { actor: input.actor } : {}),
+            ...(input.reason ? { reason: input.reason } : {}),
+        });
+        const replay = await this.replayEvent({
+            sourceId: input.sourceId,
+            messageId: input.messageId,
+            force: input.force ?? true,
+            ...(typeof input.dryRun === "boolean" ? { dryRun: input.dryRun } : {}),
+        });
+        return {
+            feedback: feedback.feedback,
+            replay,
         };
     }
     async replayEvent(options) {
@@ -895,12 +975,20 @@ function senderFromDecision(decision) {
     const payload = suspiciousPayloadFromDecision(decision);
     return typeof payload?.sender === "string" ? payload.sender : undefined;
 }
+function normalizeEmailAddress(value) {
+    const normalized = value?.trim().toLowerCase();
+    return normalized || undefined;
+}
+function domainFromSender(sender) {
+    return sender?.split("@").pop();
+}
+function normalizeDomain(value) {
+    const normalized = value?.trim().toLowerCase();
+    return normalized || undefined;
+}
 function subjectFromDecision(decision) {
     const payload = suspiciousPayloadFromDecision(decision);
     return typeof payload?.subject === "string" ? payload.subject : undefined;
-}
-function firstWakeTargetId(config) {
-    return config.wakeTargets[0]?.id;
 }
 function removeUndefined(value) {
     return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));

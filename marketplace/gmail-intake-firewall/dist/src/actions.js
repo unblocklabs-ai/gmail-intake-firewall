@@ -50,11 +50,23 @@ export async function executePlannedActions(actions, dryRun, deps) {
                 }
                 await deps.gmail.applyLabel(action.messageId, action.label);
             }
+            else if (action.type === "gmail_remove_label") {
+                if (!deps.gmail?.removeLabel) {
+                    throw new Error("Gmail label removal executor is not configured");
+                }
+                await deps.gmail.removeLabel(action.messageId, action.label);
+            }
             else if (action.type === "gmail_archive") {
                 if (!deps.gmail) {
                     throw new Error("Gmail action executor is not configured");
                 }
                 await deps.gmail.archive(action.messageId);
+            }
+            else if (action.type === "gmail_restore_inbox") {
+                if (!deps.gmail?.restoreInbox) {
+                    throw new Error("Gmail inbox restore executor is not configured");
+                }
+                await deps.gmail.restoreInbox(action.messageId);
             }
             else if (action.type === "human_alert" && action.sink === "slack") {
                 if (!deps.slack) {
@@ -96,7 +108,9 @@ export function requiredActionsSucceeded(results) {
 }
 function isRequiredExecutableAction(action) {
     return action.type === "gmail_label"
+        || action.type === "gmail_remove_label"
         || action.type === "gmail_archive"
+        || action.type === "gmail_restore_inbox"
         || action.type === "human_alert"
         || action.type === "agent_wake";
 }

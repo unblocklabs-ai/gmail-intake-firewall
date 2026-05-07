@@ -113,16 +113,21 @@ test("Gmail client lists candidates with labelIds and applies label/archive acti
 
   assert.deepEqual(await client.listCandidates(), [{ id: "msg-1", threadId: "thread-1" }]);
   await client.applyLabel("msg-1", "OpenClaw/Quarantine");
+  await client.removeLabel?.("msg-1", "OpenClaw/Quarantine");
   await client.applyLabel("msg-1", "OpenClaw/New");
+  await client.removeLabel?.("msg-1", "OpenClaw/Missing");
   await client.archive("msg-1");
+  await client.restoreInbox?.("msg-1");
 
   const listCall = calls.find((call) => call.kind === "list")!;
   assert.deepEqual((listCall.params as Record<string, unknown>).labelIds, ["INBOX", "UNREAD"]);
-  assert.equal(calls.some((call) => call.kind === "labels.create"), true);
+  assert.equal(calls.filter((call) => call.kind === "labels.create").length, 1);
   assert.deepEqual(calls.filter((call) => call.kind === "modify").map((call) => (call.params as Record<string, unknown>).requestBody), [
     { addLabelIds: ["Label_1"] },
+    { removeLabelIds: ["Label_1"] },
     { addLabelIds: ["Label_2"] },
     { removeLabelIds: ["INBOX"] },
+    { addLabelIds: ["INBOX"] },
   ]);
 });
 

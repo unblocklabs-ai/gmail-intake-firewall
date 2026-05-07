@@ -29,7 +29,8 @@ export type SqliteStateStore = {
     listFeedbackEvents(limit?: number): Array<Record<string, unknown>>;
     listFeedbackForMessage(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
     listRoutingPreferences(sourceId?: string): RoutingPreference[];
-    listQuarantine(limit?: number): Array<Record<string, unknown>>;
+    getReviewStats(sourceId?: string): Record<string, unknown>;
+    listQuarantine(limit?: number, sourceId?: string): Array<Record<string, unknown>>;
     listEvents(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;
     findLatestEvent(sourceId: string, messageId: string): IntakeEvent | undefined;
     listDecisions(sourceId: string, messageId: string, limit?: number): Array<Record<string, unknown>>;

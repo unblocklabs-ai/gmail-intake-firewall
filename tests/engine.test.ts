@@ -219,9 +219,10 @@ test("irrelevant safe email records state without wake", async () => {
 test("mute sender preference changes future safe routing to none", async () => {
   const result = await processMessage(baseMessage, config(), createEmptyState(), {
     routingPreferences: [{
-      type: "mute_sender",
+      type: "mute",
+      scope: "sender",
       sourceId: "primary",
-      sender: "client@example.com",
+      value: "client@example.com",
       createdAt: "2026-05-06T12:00:00.000Z",
     }],
     securityClassifier: security({
@@ -248,9 +249,10 @@ test("mute sender preference changes future safe routing to none", async () => {
 test("sender preference does not bypass risky quarantine", async () => {
   const result = await processMessage(baseMessage, config(), createEmptyState(), {
     routingPreferences: [{
-      type: "mute_sender",
+      type: "mute",
+      scope: "sender",
       sourceId: "primary",
-      sender: "client@example.com",
+      value: "client@example.com",
       createdAt: "2026-05-06T12:00:00.000Z",
     }],
     securityClassifier: security({
@@ -276,6 +278,37 @@ test("sender preference does not bypass risky quarantine", async () => {
     "local_log",
     "human_alert",
   ]);
+});
+
+test("domain always-aggregate preference changes future safe routing to aggregate", async () => {
+  const result = await processMessage(baseMessage, config(), createEmptyState(), {
+    routingPreferences: [{
+      type: "always_aggregate",
+      scope: "domain",
+      sourceId: "primary",
+      value: "example.com",
+      createdAt: "2026-05-06T12:00:00.000Z",
+    }],
+    securityClassifier: security({
+      verdict: "safe",
+      riskScore: 0.01,
+      categories: [],
+      reasons: ["safe"],
+      safeSummary: "Safe.",
+      suspiciousSignals: [],
+    }),
+    routerClassifier: router({
+      tags: ["client-dev"],
+      wakeMode: "wake_now",
+      wakeTarget: "agent:dev",
+      sanitizedSummary: "Would wake.",
+      reasons: ["router"],
+    }),
+  });
+
+  assert.equal(result.decision?.routing?.wakeMode, "aggregate");
+  assert.ok(result.decision?.routing?.tags.includes("digest"));
+  assert.deepEqual(result.decision?.actions.map((action) => action.type), ["gmail_label", "aggregate_enqueue"]);
 });
 
 test("aggregate email is queued and can be included in a digest wake", async () => {

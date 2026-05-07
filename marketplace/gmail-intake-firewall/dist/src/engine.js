@@ -41,30 +41,37 @@ export async function processMessage(message, config, state, deps) {
 }
 function applyRoutingPreference(message, routing, config, preferences) {
     const sender = message.from?.toLowerCase();
-    if (!sender) {
+    const domain = sender?.split("@").pop();
+    if (!sender && !domain) {
         return routing;
     }
-    const preference = preferences.find((candidate) => candidate.sourceId === message.sourceId && candidate.sender === sender);
+    const preference = preferences.find((candidate) => candidate.sourceId === message.sourceId && ((candidate.scope === "sender" && candidate.value === sender) ||
+        (candidate.scope === "domain" && candidate.value === domain)));
     if (!preference) {
         return routing;
     }
-    if (preference.type === "mute_sender") {
+    const preferenceTarget = preference.scope === "domain" ? `domain ${preference.value}` : `sender ${preference.value}`;
+    if (preference.type === "mute") {
         return {
             tags: [],
             wakeMode: "none",
             sanitizedSummary: routing.sanitizedSummary,
-            reasons: [...routing.reasons, `Human feedback preference muted sender ${message.from}`],
+            reasons: [...routing.reasons, `Human feedback preference muted ${preferenceTarget}`],
         };
     }
     const aggregateTag = config.tags.find((tag) => tag.wakeMode === "aggregate");
     if (!aggregateTag) {
         return routing;
     }
+    const nonInterruptingTags = routing.tags.filter((tagId) => {
+        const tag = config.tags.find((candidate) => candidate.id === tagId);
+        return tag?.wakeMode !== "wake_now";
+    });
     const aggregateRouting = {
-        tags: Array.from(new Set([...routing.tags, aggregateTag.id])),
+        tags: Array.from(new Set([...nonInterruptingTags, aggregateTag.id])),
         wakeMode: "aggregate",
         sanitizedSummary: routing.sanitizedSummary,
-        reasons: [...routing.reasons, `Human feedback preference always aggregates sender ${message.from}`],
+        reasons: [...routing.reasons, `Human feedback preference always aggregates ${preferenceTarget}`],
     };
     if (aggregateTag.wakeTarget) {
         aggregateRouting.wakeTarget = aggregateTag.wakeTarget;
