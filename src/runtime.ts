@@ -55,6 +55,11 @@ export type GmailNotificationOptions = GmailPushNotification & {
   dryRun?: boolean;
 };
 
+export type WatchLifecycleOptions = {
+  sourceId?: string;
+  force?: boolean;
+};
+
 type TimerHandle = ReturnType<typeof setInterval>;
 type PollStage =
   | "client_create"
@@ -266,7 +271,7 @@ export class GmailIntakePollingRuntime {
           hasModifyScope: source.gmailActions.hasModifyScope,
         },
         lastPoll: this.pollDiagnostics.get(source.id),
-        readiness: buildSourceReadiness(source, cursor, this.now()),
+        readiness: buildSourceReadiness(source, cursor, this.config.watch, this.now()),
         cursor,
         stats: this.deps.stateStore.getSourceStats(source.id),
       };
@@ -706,6 +711,48 @@ export class GmailIntakePollingRuntime {
     return summary;
   }
 
+  async setupWatch(options: WatchLifecycleOptions = {}): Promise<Record<string, unknown>> {
+    return this.runWatchLifecycle("setup", options);
+  }
+
+  async renewWatch(options: WatchLifecycleOptions = {}): Promise<Record<string, unknown>> {
+    return this.runWatchLifecycle("renew", options);
+  }
+
+  async repairWatch(options: WatchLifecycleOptions = {}): Promise<Record<string, unknown>> {
+    return this.runWatchLifecycle("repair", options);
+  }
+
+  private async runWatchLifecycle(
+    operation: "setup" | "renew" | "repair",
+    options: WatchLifecycleOptions,
+  ): Promise<Record<string, unknown>> {
+    const sources = this.watchSources(options.sourceId);
+    const results: Record<string, unknown>[] = [];
+    for (const source of sources) {
+      if (operation === "repair") {
+        results.push(await this.repairWatchSource(source, Boolean(options.force)));
+      } else {
+        results.push(await this.setupOrRenewWatchSource(source, {
+          force: Boolean(options.force),
+          setupOnly: operation === "setup",
+        }));
+      }
+    }
+    return {
+      operation,
+      sources: sources.length,
+      results,
+    };
+  }
+
+  private watchSources(sourceId?: string): GmailSourceConfig[] {
+    const sources = sourceId
+      ? this.config.sources.filter((source) => source.id === sourceId)
+      : this.config.sources.filter((source) => source.enabled && source.intakeMode === "watch");
+    return sources.filter((source) => source.enabled && source.intakeMode === "watch");
+  }
+
   private async runSource(source: GmailSourceConfig): Promise<PollingRunSummary> {
     const summary = this.emptySummary();
     summary.sources = 1;
@@ -963,34 +1010,11 @@ export class GmailIntakePollingRuntime {
       const cursor = this.deps.stateStore.getSourceCursor(source.id);
       const expiresAt = typeof cursor?.watchExpiresAt === "string" ? Date.parse(cursor.watchExpiresAt) : 0;
       const historyId = typeof cursor?.historyId === "string" ? cursor.historyId : undefined;
-      const needsRenewal = !historyId || expiresAt <= this.now().getTime() + 3600000;
-      if (needsRenewal) {
-        let page: GmailHistoryPage | undefined;
-        if (historyId && client.listHistory) {
-          page = await this.listHistoryOrRepair(source, client, historyId);
-        }
-        const registration = await client.setupWatch?.(source.watchTopicName, ["INBOX"]);
-        if (registration?.historyId) {
-          const nextCursor: Record<string, unknown> = {
-            ...(cursor ?? {}),
-            mode: "watch",
-            historyId: registration.historyId,
-          };
-          if (registration.expiration) {
-            nextCursor.watchExpiresAt = registration.expiration;
-          }
-          this.deps.stateStore.setSourceCursor(source.id, {
-            ...nextCursor,
-          });
-          return page?.candidates ?? [];
-        }
-        if (page?.historyId) {
-          this.deps.stateStore.setSourceCursor(source.id, {
-            ...(cursor ?? {}),
-            mode: "watch",
-            historyId: page.historyId,
-            lastHistoryAt: this.now().toISOString(),
-          });
+      const needsRenewal = !historyId || expiresAt <= this.now().getTime() + this.config.watch.renewBeforeMs;
+      if (needsRenewal && this.config.watch.autoSetup) {
+        const renewal = await this.setupOrRenewWatchSource(source, { client });
+        const page = renewal.historyPage;
+        if (page?.candidates) {
           return page.candidates;
         }
         if (!historyId) {
@@ -1034,6 +1058,188 @@ export class GmailIntakePollingRuntime {
     }
   }
 
+  private async setupOrRenewWatchSource(
+    source: GmailSourceConfig,
+    options: { force?: boolean; setupOnly?: boolean; client?: GmailClient } = {},
+  ): Promise<Record<string, unknown> & { historyPage?: GmailHistoryPage }> {
+    if (!source.watchTopicName) {
+      return { sourceId: source.id, ok: false, error: "watchTopicName is required" };
+    }
+    if (this.inFlightSources.has(source.id) && !options.client) {
+      return { sourceId: source.id, ok: false, skipped: true, error: "source is already running" };
+    }
+    const releaseLock = !options.client;
+    if (releaseLock) {
+      this.inFlightSources.add(source.id);
+    }
+    const observedAt = this.now();
+    const startedAt = observedAt.toISOString();
+    let stage: PollStage = "client_create";
+    try {
+      const cursor = this.deps.stateStore.getSourceCursor(source.id) ?? {};
+      const historyId = typeof cursor.historyId === "string" ? cursor.historyId : undefined;
+      const expiresAt = typeof cursor.watchExpiresAt === "string" ? Date.parse(cursor.watchExpiresAt) : 0;
+      const needsRenewal = !historyId || expiresAt <= observedAt.getTime() + this.config.watch.renewBeforeMs;
+      if (!options.force && !needsRenewal && !options.setupOnly) {
+        return { sourceId: source.id, ok: true, skipped: true, reason: "watch_not_due" };
+      }
+      if (!options.force && historyId && options.setupOnly) {
+        return { sourceId: source.id, ok: true, skipped: true, reason: "watch_cursor_exists" };
+      }
+      const client = options.client ?? await this.deps.gmailClientFactory(source);
+      let historyPage: GmailHistoryPage | undefined;
+      if (historyId && client.listHistory) {
+        stage = "candidate_list";
+        historyPage = await this.listHistoryOrRepair(source, client, historyId);
+      }
+      stage = "cursor_update";
+      const registration = await client.setupWatch?.(source.watchTopicName, this.config.watch.labelIds, this.config.watch.labelFilterBehavior);
+      if (!registration?.historyId) {
+        const nextCursor: Record<string, unknown> = {
+          ...cursor,
+          mode: "watch",
+          ...(historyPage?.historyId ? { historyId: historyPage.historyId, lastHistoryAt: observedAt.toISOString() } : {}),
+          lastWatchAttemptAt: observedAt.toISOString(),
+        };
+        this.deps.stateStore.setSourceCursor(source.id, nextCursor, observedAt.toISOString());
+        return {
+          sourceId: source.id,
+          ok: false,
+          stage,
+          error: "Gmail watch registration did not return historyId",
+          ...(historyPage ? { historyPage } : {}),
+        };
+      }
+      const nextCursor: Record<string, unknown> = {
+        ...cursor,
+        mode: "watch",
+        historyId: registration.historyId,
+        lastWatchAttemptAt: observedAt.toISOString(),
+        lastWatchRenewalAt: observedAt.toISOString(),
+        watchLabelIds: this.config.watch.labelIds,
+        watchLabelFilterBehavior: this.config.watch.labelFilterBehavior,
+      };
+      if (registration.expiration) {
+        nextCursor.watchExpiresAt = registration.expiration;
+      }
+      this.deps.stateStore.setSourceCursor(source.id, nextCursor, observedAt.toISOString());
+      this.pollDiagnostics.set(source.id, {
+        status: "succeeded",
+        startedAt,
+        finishedAt: this.now().toISOString(),
+        stage,
+        eventCount: historyPage?.candidates.length ?? 0,
+        fetched: 0,
+        processed: 0,
+        skipped: 0,
+        errors: 0,
+      });
+      return {
+        sourceId: source.id,
+        ok: true,
+        stage,
+        historyId: registration.historyId,
+        ...(registration.expiration ? { watchExpiresAt: registration.expiration } : {}),
+        drainedCandidatesBeforeRenewal: historyPage?.candidates.length ?? 0,
+        ...(historyPage ? { historyPage } : {}),
+      };
+    } catch (error) {
+      const safeError = safeRuntimeError(error);
+      this.pollDiagnostics.set(source.id, {
+        status: "failed",
+        startedAt,
+        finishedAt: this.now().toISOString(),
+        stage,
+        errors: 1,
+        error: safeError,
+      });
+      this.deps.logger?.error?.("gmail-intake-firewall watch lifecycle failed", {
+        sourceId: source.id,
+        stage,
+        error: safeError.message,
+      });
+      return { sourceId: source.id, ok: false, stage, error: safeError };
+    } finally {
+      if (releaseLock) {
+        this.inFlightSources.delete(source.id);
+      }
+    }
+  }
+
+  private async repairWatchSource(source: GmailSourceConfig, force: boolean): Promise<Record<string, unknown>> {
+    if (this.inFlightSources.has(source.id)) {
+      return { sourceId: source.id, ok: false, skipped: true, error: "source is already running" };
+    }
+    this.inFlightSources.add(source.id);
+    const observedAt = this.now();
+    const startedAt = observedAt.toISOString();
+    let stage: PollStage = "client_create";
+    try {
+      const cursor = this.deps.stateStore.getSourceCursor(source.id) ?? {};
+      const historyId = typeof cursor.historyId === "string" ? cursor.historyId : undefined;
+      if (!historyId) {
+        return { sourceId: source.id, ok: false, skipped: true, error: "history cursor is missing" };
+      }
+      if (!force && !watchRepairDue(cursor, this.config.watch.repairOnNoNotificationMs, observedAt)) {
+        return { sourceId: source.id, ok: true, skipped: true, reason: "repair_not_due" };
+      }
+      const client = await this.deps.gmailClientFactory(source);
+      stage = "candidate_list";
+      const page = await this.listHistoryOrRepair(source, client, historyId);
+      const batch = await this.processCandidateEvents(source, client, page.candidates, observedAt, "gmail_history");
+      stage = "cursor_update";
+      const nextCursor: Record<string, unknown> = {
+        ...cursor,
+        mode: "watch",
+        lastRepairAt: observedAt.toISOString(),
+        candidateCount: page.candidates.length,
+      };
+      if (batch.errors === 0) {
+        nextCursor.historyId = page.historyId ?? historyId;
+        nextCursor.lastHistoryAt = observedAt.toISOString();
+      }
+      this.deps.stateStore.setSourceCursor(source.id, nextCursor, observedAt.toISOString());
+      this.pollDiagnostics.set(source.id, {
+        status: batch.errors > 0 ? "completed_with_errors" : "succeeded",
+        startedAt,
+        finishedAt: this.now().toISOString(),
+        stage,
+        eventCount: batch.events,
+        fetched: batch.fetched,
+        processed: batch.processed,
+        skipped: batch.skipped,
+        errors: batch.errors,
+        ...(batch.lastEventDiagnostic ? {
+          stage: batch.lastEventDiagnostic.stage,
+          error: batch.lastEventDiagnostic.error,
+        } : {}),
+      });
+      return {
+        sourceId: source.id,
+        ok: batch.errors === 0,
+        ...batch,
+      };
+    } catch (error) {
+      const safeError = safeRuntimeError(error);
+      this.pollDiagnostics.set(source.id, {
+        status: "failed",
+        startedAt,
+        finishedAt: this.now().toISOString(),
+        stage,
+        errors: 1,
+        error: safeError,
+      });
+      this.deps.logger?.error?.("gmail-intake-firewall watch repair failed", {
+        sourceId: source.id,
+        stage,
+        error: safeError.message,
+      });
+      return { sourceId: source.id, ok: false, stage, error: safeError };
+    } finally {
+      this.inFlightSources.delete(source.id);
+    }
+  }
+
   private emptySummary(): PollingRunSummary {
     return {
       sources: 0,
@@ -1050,13 +1256,18 @@ export class GmailIntakePollingRuntime {
   }
 }
 
-function buildSourceReadiness(source: GmailSourceConfig, cursor: Record<string, unknown> | undefined, now: Date): Record<string, unknown> {
+function buildSourceReadiness(source: GmailSourceConfig, cursor: Record<string, unknown> | undefined, watchConfig: PluginConfig["watch"], now: Date): Record<string, unknown> {
   const mode = source.intakeMode ?? "poll";
   const historyId = typeof cursor?.historyId === "string" ? cursor.historyId : undefined;
   const watchExpiresAt = typeof cursor?.watchExpiresAt === "string" ? cursor.watchExpiresAt : undefined;
   const watchExpiresMs = watchExpiresAt ? Date.parse(watchExpiresAt) : Number.NaN;
   const watchActive = Number.isFinite(watchExpiresMs) && watchExpiresMs > now.getTime();
-  const watchNeedsRenewal = mode === "watch" && (!watchActive || watchExpiresMs <= now.getTime() + 3600000);
+  const watchNeedsRenewal = mode === "watch" && (!watchActive || watchExpiresMs <= now.getTime() + watchConfig.renewBeforeMs);
+  const lastNotificationAt = typeof cursor?.lastNotificationAt === "string" ? cursor.lastNotificationAt : undefined;
+  const lastHistoryAt = typeof cursor?.lastHistoryAt === "string" ? cursor.lastHistoryAt : undefined;
+  const lastWatchRenewalAt = typeof cursor?.lastWatchRenewalAt === "string" ? cursor.lastWatchRenewalAt : undefined;
+  const lastRepairAt = typeof cursor?.lastRepairAt === "string" ? cursor.lastRepairAt : undefined;
+  const missedNotificationRepairDue = mode === "watch" && Boolean(historyId) && watchRepairDue(cursor, watchConfig.repairOnNoNotificationMs, now);
   const configuredModifyScope = source.gmailActions.enabled && source.gmailActions.hasModifyScope;
   const credentialScopes = Array.isArray(cursor?.credentialScopes)
     ? cursor.credentialScopes.filter((scope): scope is string => typeof scope === "string")
@@ -1076,8 +1287,31 @@ function buildSourceReadiness(source: GmailSourceConfig, cursor: Record<string, 
       watchTopicConfigured: Boolean(source.watchTopicName),
       watchActive,
       watchNeedsRenewal,
+      watchAutoSetup: watchConfig.autoSetup,
+      watchLabelIds: watchConfig.labelIds,
+      watchLabelFilterBehavior: watchConfig.labelFilterBehavior,
+      missedNotificationRepairDue,
+      ...(lastNotificationAt ? { lastNotificationAt } : {}),
+      ...(lastHistoryAt ? { lastHistoryAt } : {}),
+      ...(lastWatchRenewalAt ? { lastWatchRenewalAt } : {}),
+      ...(lastRepairAt ? { lastRepairAt } : {}),
     } : {}),
   };
+}
+
+function watchRepairDue(cursor: Record<string, unknown> | undefined, repairOnNoNotificationMs: number, now: Date): boolean {
+  if (!cursor) {
+    return false;
+  }
+  const lastNotificationAt = typeof cursor.lastNotificationAt === "string" ? Date.parse(cursor.lastNotificationAt) : Number.NaN;
+  const lastHistoryAt = typeof cursor.lastHistoryAt === "string" ? Date.parse(cursor.lastHistoryAt) : Number.NaN;
+  const lastRepairAt = typeof cursor.lastRepairAt === "string" ? Date.parse(cursor.lastRepairAt) : Number.NaN;
+  const newestObserved = Math.max(
+    Number.isFinite(lastNotificationAt) ? lastNotificationAt : 0,
+    Number.isFinite(lastHistoryAt) ? lastHistoryAt : 0,
+    Number.isFinite(lastRepairAt) ? lastRepairAt : 0,
+  );
+  return newestObserved === 0 || newestObserved <= now.getTime() - repairOnNoNotificationMs;
 }
 
 function safeQuarantineItem(
@@ -1108,7 +1342,12 @@ function safeQuarantineItem(
     labels: alertPayload?.labels,
     authHeaders: alertPayload?.authHeaders,
     linkDomains: alertPayload?.linkDomains,
+    links: alertPayload?.links,
+    linkRiskHints: alertPayload?.linkRiskHints,
     attachments: alertPayload?.attachments,
+    attachmentRiskHints: alertPayload?.attachmentRiskHints,
+    artifactNotes: alertPayload?.artifactNotes,
+    artifactAnalysis: decision.artifactAnalysis,
     riskReasons: alertPayload?.riskReasons,
     suspiciousSignals: alertPayload?.suspiciousSignals,
     sanitizedSummary: alertPayload?.sanitizedSummary ?? (decision.security as Record<string, unknown> | undefined)?.safeSummary,

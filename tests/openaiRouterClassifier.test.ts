@@ -35,6 +35,11 @@ const input: RouterClassifierInput = {
     bodyText: "Can you review this bug?",
     links: [],
     attachments: [],
+    artifactAnalysis: {
+      links: [],
+      attachments: [],
+      notes: [],
+    },
   },
   security: {
     verdict: "safe",

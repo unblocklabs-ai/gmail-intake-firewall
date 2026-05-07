@@ -43,6 +43,10 @@ export type GmailNotificationOptions = GmailPushNotification & {
     force?: boolean;
     dryRun?: boolean;
 };
+export type WatchLifecycleOptions = {
+    sourceId?: string;
+    force?: boolean;
+};
 export declare class GmailIntakePollingRuntime {
     private readonly config;
     private readonly deps;
@@ -95,6 +99,11 @@ export declare class GmailIntakePollingRuntime {
     }): Promise<Record<string, unknown>>;
     replayEvent(options: ReplayOptions): Promise<PollingRunSummary>;
     handleGmailNotification(options: GmailNotificationOptions): Promise<PollingRunSummary>;
+    setupWatch(options?: WatchLifecycleOptions): Promise<Record<string, unknown>>;
+    renewWatch(options?: WatchLifecycleOptions): Promise<Record<string, unknown>>;
+    repairWatch(options?: WatchLifecycleOptions): Promise<Record<string, unknown>>;
+    private runWatchLifecycle;
+    private watchSources;
     private runSource;
     private processCandidateEvents;
     private processEvent;
@@ -102,6 +111,8 @@ export declare class GmailIntakePollingRuntime {
     private findNotificationSource;
     private listSourceCandidates;
     private listHistoryOrRepair;
+    private setupOrRenewWatchSource;
+    private repairWatchSource;
     private emptySummary;
     private now;
 }

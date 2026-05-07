@@ -88,6 +88,9 @@ Service methods:
 
 - `validateConfig()` returns actionable config errors/warnings for duplicate ids, missing wake targets, invalid aggregate cadences, invalid timezones, watch mode without a topic, and likely Gmail scope mismatches.
 - `status()` reports configured sources, per-source cursor/state, last poll status/error stage, pending aggregate count, processed counts, quarantine counts, failed action attempts, and aggregate timezone.
+- `setupWatch({ sourceId, force })` explicitly registers a Gmail watch for one watch-mode source, stores Gmail's returned `historyId`/expiration, and does not process the initial mailbox snapshot.
+- `renewWatch({ sourceId, force })` renews one source when the configured renewal window is due, or all watch sources when no `sourceId` is supplied. Renewal drains old history before calling Gmail `watch`.
+- `repairWatch({ sourceId, force })` runs a bounded history repair for watch-mode sources that have gone too long without notification/history/repair activity.
 - `backfill(options)` runs bounded replay from Gmail candidates. Through the plugin service, `query` or `maxResults` is required unless `allowUnbounded: true` is explicit.
 - `handleGmailNotification(options)` accepts a direct Gmail notification or Pub/Sub push envelope. It resolves the source by `sourceId` or Gmail `emailAddress`, drains Gmail history from the stored cursor, records `gmail_watch` intake events, and updates the cursor. If no stored cursor exists, it records the notification history id and skips processing rather than guessing a starting point.
 - `POST /gmail-intake-firewall/pubsub` is the HTTP route for Gmail Pub/Sub push delivery. It requires `webhookSecret` as `Authorization: Bearer <secret>`, `x-openclaw-token`, or a `token` query parameter. The route is intentionally plugin-authenticated rather than operator-authenticated so Google Pub/Sub can call it.
@@ -104,6 +107,56 @@ Review tool:
 - `releaseFromQuarantine` can remove the configured quarantine label and optionally restore `INBOX` after a human marks an item safe. Gmail mutation still requires source Gmail actions to be enabled and `hasModifyScope: true`; dry-run returns the intended Gmail actions without applying them.
 - `replayWithFeedback` records the human decision and replays the latest stored intake event with `force: true` by default, so a reviewed-safe message can run through security/router policy again and produce the normal label/aggregate/wake behavior.
 - `wakeNow` creates a sanitized detached wake from the reviewed decision. It requires an explicit `wakeTarget` for reviewed quarantines and does not include raw suspicious body or attachments.
+- Artifact analysis is local and non-fetching by default. Link metadata includes structural risk hints without requesting URLs, and attachment metadata includes filename/MIME/extension risk hints without downloading or opening attachment bytes. Keep `artifacts.fetchLinks` and `artifacts.downloadAttachments` false in this version.
+
+## Gmail Watch / PubSub Production Setup
+
+Use watch mode when the OpenClaw gateway can receive Google Pub/Sub push requests. Polling and history repair remain enabled because Gmail notifications can be delayed or dropped.
+
+Google Cloud setup:
+
+1. Enable Gmail API and Pub/Sub API in the same Google Cloud project used by the OAuth client.
+2. Create a Pub/Sub topic, for example `projects/my-project/topics/gmail-intake`.
+3. Grant Gmail publish permission on that topic per the Gmail push notification docs. The topic project id must match the developer project used by the watch request.
+4. Create a push subscription targeting the OpenClaw gateway route: `https://<gateway-host>/gmail-intake-firewall/pubsub`.
+5. Configure the subscription to pass the plugin `webhookSecret` as either `Authorization: Bearer <secret>`, `x-openclaw-token`, or a `token` query parameter. Shared-secret auth is the v1 production path; Pub/Sub OIDC verification is planned later.
+
+Plugin config shape:
+
+```json
+{
+  "webhookSecret": "use-an-openclaw-secret-or-private-config-value",
+  "watch": {
+    "autoSetup": true,
+    "renewBeforeMs": 86400000,
+    "repairOnNoNotificationMs": 21600000,
+    "labelIds": ["INBOX"],
+    "labelFilterBehavior": "INCLUDE"
+  },
+  "sources": [
+    {
+      "id": "primary",
+      "accountEmail": "user@example.com",
+      "intakeMode": "watch",
+      "watchTopicName": "projects/my-project/topics/gmail-intake",
+      "historyLookback": "2d",
+      "authRef": { "source": "openclaw", "provider": "secrets", "id": "gmail-primary" }
+    }
+  ]
+}
+```
+
+Operator runbook:
+
+1. Start with `dryRun: true`.
+2. Call `gmail_intake_firewall_status` with `operation: "validateConfig"` and fix all errors.
+3. Call `gmail_intake_firewall_status` with `operation: "checkSourceAuth"` for the watch source.
+4. Call `gmail_intake_firewall_status` with `operation: "setupWatch", sourceId: "primary"`.
+5. Confirm `status().sources[].readiness.historyCursorPresent` and `watchActive` are true.
+6. Send a test email. The first Gmail watch notification may only establish the cursor; subsequent notifications should drain Gmail history and process messages.
+7. Watch `lastNotificationAt`, `lastHistoryAt`, `lastWatchRenewalAt`, `watchNeedsRenewal`, and `missedNotificationRepairDue` in status.
+8. If notifications appear missed, call `gmail_intake_firewall_status` with `operation: "repairWatch", sourceId: "primary", force: true`.
+9. If watch expiration is near or status reports `watchNeedsRenewal`, call `operation: "renewWatch", sourceId: "primary", force: true`.
 
 Agent-facing quarantine review prompt:
 
@@ -112,7 +165,7 @@ You are reviewing a quarantined Gmail item through gmail-intake-firewall.
 
 1. Call gmail_intake_firewall_review with operation=listQuarantine or reviewSummary to find pending items.
 2. For a selected item, call operation=getQuarantineItem with sourceId and messageId.
-3. Show the human only safe fields: sender, reply-to, recipients, subject, date, Gmail link, labels, SPF/DKIM/DMARC/auth headers, link domains, attachment metadata, risk reasons, suspicious signals, sanitized summary, and prior feedback/action status. Do not ask for or display raw body, raw HTML, snippet, or attachment contents.
+3. Show the human only safe fields: sender, reply-to, recipients, subject, date, Gmail link, labels, SPF/DKIM/DMARC/auth headers, link domains, link risk hints, attachment metadata/risk hints, risk reasons, suspicious signals, sanitized summary, and prior feedback/action status. Do not ask for or display raw body, raw HTML, snippet, fetched link content, or attachment contents.
 4. Ask a concise text question such as:
    "This email was quarantined as possible phishing. Do you want me to mark it harmful, release it as safe, wake an agent with a sanitized summary, mute this sender, always aggregate this sender, or leave it quarantined?"
 5. Map the human's answer to review operations:
@@ -125,6 +178,7 @@ You are reviewing a quarantined Gmail item through gmail-intake-firewall.
    - always aggregate sender -> alwaysAggregate
    - remove always aggregate -> removeAlwaysAggregate
    - domain-level preferences -> use the matching Domain operation only when the human clearly asks for all mail from that domain
+   - request deeper artifact review -> explain that v1 only provides metadata/risk hints and requires an external approved workflow for opening links or files
 6. After any operation, summarize what changed and include sourceId/messageId for auditability.
 ```
 
@@ -175,6 +229,13 @@ Example policy skeleton:
   "aggregate": {
     "maxDigestItems": 50,
     "timezone": "America/New_York"
+  },
+  "artifacts": {
+    "analyzeLinks": true,
+    "analyzeAttachments": true,
+    "fetchLinks": false,
+    "downloadAttachments": false,
+    "maxDisplayedUrlChars": 160
   }
 }
 ```
@@ -243,7 +304,7 @@ The next phase should build the real end-to-end v1 around the scaffold. Phase 1 
    - Done: add operator-grade poll diagnostics for gateway/service startup paths, including redacted stage-specific errors in logs and status output.
    - Done: add a service-level Gmail Pub/Sub notification handoff that drains stored history cursors.
    - Done: add authenticated `POST /gmail-intake-firewall/pubsub` route for host HTTP/PubSub delivery.
-   - Add full install examples for Gmail OAuth and Pub/Sub setup.
+   - Done: add full install/runbook examples for Gmail OAuth and Pub/Sub setup.
    - Expand Slack feedback buttons from recorded feedback events into rule/example updates.
    - Add richer thread-aware classifier prompts using bounded thread context.
 

@@ -3,8 +3,12 @@ import type {
   NormalizedMessageForClassification,
   SecurityClassification,
   SecurityConfig,
+  ArtifactConfig,
+  ArtifactAnalysis,
 } from "./types.js";
 import { extractLinksFromGmailContent, normalizeLinks, sanitizeGmailBody } from "./gmailSanitize.js";
+import { analyzeLinks, summarizeLinkMetadata } from "./linkAnalysis.js";
+import { analyzeAttachments } from "./attachmentAnalysis.js";
 
 export type SecurityClassifier = {
   classify(message: NormalizedMessageForClassification): Promise<SecurityClassification>;
@@ -37,14 +41,36 @@ function numericThreshold(value: unknown, fallback: number): number {
 export function normalizeMessageForSecurity(
   message: InboundMessage,
   maxBodyChars: number,
+  artifacts: ArtifactConfig = {
+    analyzeLinks: true,
+    analyzeAttachments: true,
+    fetchLinks: false,
+    downloadAttachments: false,
+    maxDisplayedUrlChars: 160,
+  },
 ): NormalizedMessageForClassification {
   const textBody = sanitizeGmailBody(message.bodyText, false);
   const htmlText = sanitizeGmailBody(message.bodyHtml, true);
   const bodyText = clipText([textBody, htmlText].filter(Boolean).join("\n\n"), maxBodyChars);
-  const links = normalizeLinks([
+  const normalizedLinks = normalizeLinks([
     ...(message.linkUrls ?? []),
     ...extractLinksFromGmailContent(message.bodyText, message.bodyHtml),
   ]);
+  const links = artifacts.analyzeLinks
+    ? analyzeLinks(normalizedLinks, artifacts.maxDisplayedUrlChars)
+    : normalizedLinks.map((link) => summarizeLinkMetadata(link, artifacts.maxDisplayedUrlChars));
+  const attachments = artifacts.analyzeAttachments
+    ? analyzeAttachments(message.attachments)
+    : message.attachments.map((attachment) => ({
+      ...attachment,
+      riskHints: [],
+      hasAttachmentId: Boolean(attachment.id),
+    }));
+  const artifactAnalysis: ArtifactAnalysis = {
+    links,
+    attachments,
+    notes: buildArtifactNotes(artifacts),
+  };
   const authHeaders = pickAuthHeaders(message.headers);
   const replyTo = headerValue(message.headers, "reply-to");
   const normalized: NormalizedMessageForClassification = {
@@ -60,7 +86,8 @@ export function normalizeMessageForSecurity(
     labels: message.labels,
     bodyText,
     links,
-    attachments: message.attachments,
+    attachments,
+    artifactAnalysis,
   };
   if (message.from) {
     normalized.from = message.from;
@@ -78,6 +105,17 @@ export function normalizeMessageForSecurity(
     normalized.threadContext = message.threadContext;
   }
   return normalized;
+}
+
+function buildArtifactNotes(artifacts: ArtifactConfig): string[] {
+  return [
+    artifacts.analyzeLinks
+      ? "Links were structurally analyzed only; URLs were not fetched."
+      : "Link analysis was disabled by config; URLs were normalized only and were not fetched.",
+    artifacts.analyzeAttachments
+      ? "Attachments were metadata-analyzed only; attachment bytes were not downloaded or opened."
+      : "Attachment analysis was disabled by config; attachment bytes were not downloaded or opened.",
+  ];
 }
 
 function clipText(value: string, maxChars: number): string {

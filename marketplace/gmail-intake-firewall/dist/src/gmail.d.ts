@@ -22,7 +22,7 @@ export type GmailSourceAdapter = {
 export type GmailClient = {
     listCandidates(query?: string): Promise<GmailCandidate[]>;
     listHistory?(startHistoryId: string): Promise<GmailHistoryPage>;
-    setupWatch?(topicName: string, labelIds?: string[]): Promise<GmailWatchRegistration>;
+    setupWatch?(topicName: string, labelIds?: string[], labelFilterBehavior?: "INCLUDE" | "EXCLUDE"): Promise<GmailWatchRegistration>;
     fetchMessage(candidate: GmailCandidate): Promise<InboundMessage>;
     fetchThreadContext?(threadId: string, maxMessages?: number): Promise<import("./types.js").GmailThreadContext | undefined>;
     applyLabel(messageId: string, label: string): Promise<void>;

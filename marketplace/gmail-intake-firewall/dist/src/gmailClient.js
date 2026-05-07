@@ -58,7 +58,7 @@ export function createGmailClientFromApi(source, api) {
         async listHistory(startHistoryId) {
             return listHistory(api, startHistoryId);
         },
-        async setupWatch(topicName, labelIds = ["INBOX"]) {
+        async setupWatch(topicName, labelIds = ["INBOX"], labelFilterBehavior = "INCLUDE") {
             if (!api.users.watch) {
                 throw new Error("Gmail watch API is unavailable");
             }
@@ -67,7 +67,7 @@ export function createGmailClientFromApi(source, api) {
                 requestBody: {
                     topicName,
                     labelIds,
-                    labelFilterBehavior: "INCLUDE",
+                    labelFilterBehavior,
                 },
             }));
             const registration = {};

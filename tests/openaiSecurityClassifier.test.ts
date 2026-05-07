@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { resolvePluginConfig } from "../src/config.js";
 import { createOpenAiSecurityClassifier, resolveOpenAiApiKey } from "../src/openaiSecurityClassifier.js";
+import { normalizeMessageForSecurity } from "../src/securityClassifier.js";
 import type { NormalizedMessageForClassification } from "../src/types.js";
 
 const normalized: NormalizedMessageForClassification = {
@@ -19,6 +20,14 @@ const normalized: NormalizedMessageForClassification = {
   bodyText: "Hello",
   links: [],
   attachments: [],
+  artifactAnalysis: {
+    links: [],
+    attachments: [],
+    notes: [
+      "Links were structurally analyzed only; URLs were not fetched.",
+      "Attachments were metadata-analyzed only; attachment bytes were not downloaded or opened.",
+    ],
+  },
 };
 
 test("OpenAI API key resolves from SecretRef before config fallback", async () => {
@@ -40,6 +49,37 @@ test("OpenAI API key resolves from SecretRef before config fallback", async () =
 test("config defaults OpenAI model to gpt-5.5 and accepts override", () => {
   assert.equal(resolvePluginConfig({}).openai_model, "gpt-5.5");
   assert.equal(resolvePluginConfig({ openai_model: "gpt-5.5-mini" }).openai_model, "gpt-5.5-mini");
+});
+
+test("disabled link analysis still clips and redacts displayed URLs", () => {
+  const normalizedMessage = normalizeMessageForSecurity({
+    sourceId: "primary",
+    accountEmail: "user@example.com",
+    messageId: "msg-1",
+    threadId: "thread-1",
+    headers: {},
+    rawHeaders: [],
+    to: ["user@example.com"],
+    cc: [],
+    bcc: [],
+    labels: ["INBOX"],
+    bodyText: "See https://user:pass@example.com/reset?token=secret-token&next=/home",
+    attachments: [],
+  }, 500, {
+    analyzeLinks: false,
+    analyzeAttachments: false,
+    fetchLinks: false,
+    downloadAttachments: false,
+    maxDisplayedUrlChars: 48,
+  });
+
+  assert.equal(normalizedMessage.links.length, 1);
+  assert.equal(normalizedMessage.links[0]?.riskHints.length, 0);
+  assert.equal(normalizedMessage.links[0]?.url.includes("user:pass"), false);
+  assert.equal(normalizedMessage.links[0]?.url.includes("secret-token"), false);
+  assert.ok((normalizedMessage.links[0]?.url.length ?? 0) <= 48);
+  assert.match(normalizedMessage.artifactAnalysis.notes.join(" "), /Link analysis was disabled/);
+  assert.match(normalizedMessage.artifactAnalysis.notes.join(" "), /Attachment analysis was disabled/);
 });
 
 test("OpenAI classifier sends structured output request and normalizes response", async () => {
@@ -71,6 +111,8 @@ test("OpenAI classifier sends structured output request and normalizes response"
   assert.equal(body.model, "gpt-5.5");
   assert.deepEqual((body.text as { format: { type: string; name: string } }).format.type, "json_schema");
   assert.equal((calls[0]?.init?.headers as Record<string, string>).Authorization, "Bearer test-key");
+  assert.match(JSON.stringify(body), /URLs were not fetched/);
+  assert.match(JSON.stringify(body), /attachment bytes were not downloaded/);
 });
 
 test("OpenAI classifier accepts explicit malicious verdict", async () => {

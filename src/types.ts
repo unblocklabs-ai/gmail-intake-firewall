@@ -71,6 +71,22 @@ export type AlertSinkConfig = {
   enabled: boolean;
 };
 
+export type ArtifactConfig = {
+  analyzeLinks: boolean;
+  analyzeAttachments: boolean;
+  fetchLinks: boolean;
+  downloadAttachments: boolean;
+  maxDisplayedUrlChars: number;
+};
+
+export type WatchConfig = {
+  autoSetup: boolean;
+  renewBeforeMs: number;
+  repairOnNoNotificationMs: number;
+  labelIds: string[];
+  labelFilterBehavior: "INCLUDE" | "EXCLUDE";
+};
+
 export type PluginConfig = {
   enabled: boolean;
   dryRun: boolean;
@@ -89,6 +105,8 @@ export type PluginConfig = {
     maxDigestItems: number;
     timezone: string;
   };
+  artifacts: ArtifactConfig;
+  watch: WatchConfig;
 };
 
 export type RoutingPreference = {
@@ -138,6 +156,44 @@ export type InboundMessage = {
 export type NormalizedLink = {
   url: string;
   domain?: string;
+  registrableDomain?: string;
+  scheme?: string;
+  riskHints?: string[];
+  isShortener?: boolean;
+  isIpLiteral?: boolean;
+  isPunycode?: boolean;
+  isHttps?: boolean;
+  unusualPort?: string;
+  pathExtension?: string;
+};
+
+export type LinkRiskMetadata = Required<Pick<NormalizedLink, "url" | "domain" | "riskHints">> & {
+  registrableDomain?: string;
+  scheme?: string;
+  isShortener?: boolean;
+  isIpLiteral?: boolean;
+  isPunycode?: boolean;
+  isHttps?: boolean;
+  unusualPort?: string;
+  pathExtension?: string;
+};
+
+export type AttachmentRiskMetadata = AttachmentMetadata & {
+  extension?: string;
+  riskHints: string[];
+  hasAttachmentId: boolean;
+  isArchive?: boolean;
+  isMacroCapable?: boolean;
+  isExecutable?: boolean;
+  isScript?: boolean;
+  hasDoubleExtension?: boolean;
+  mimeExtensionMismatch?: boolean;
+};
+
+export type ArtifactAnalysis = {
+  links: LinkRiskMetadata[];
+  attachments: AttachmentRiskMetadata[];
+  notes: string[];
 };
 
 export type NormalizedMessageForClassification = {
@@ -156,8 +212,9 @@ export type NormalizedMessageForClassification = {
   labels: string[];
   snippet?: string;
   bodyText: string;
-  links: NormalizedLink[];
-  attachments: AttachmentMetadata[];
+  links: LinkRiskMetadata[];
+  attachments: AttachmentRiskMetadata[];
+  artifactAnalysis: ArtifactAnalysis;
   threadContext?: GmailThreadContext;
 };
 
@@ -186,6 +243,7 @@ export type DecisionLogEntry = {
   threadId: string;
   security: SecurityClassification;
   routing?: RoutingClassification;
+  artifactAnalysis?: ArtifactAnalysis;
   actions: PlannedAction[];
   dryRun: boolean;
 };
@@ -211,7 +269,17 @@ export type AgentWakePayload = {
   tags: string[];
   sanitizedSummary: string;
   security: SecurityClassification;
+  artifacts?: ArtifactWakeSummary;
   wakeTarget?: WakeTargetConfig;
+};
+
+export type ArtifactWakeSummary = {
+  linkCount: number;
+  linkDomains: string[];
+  linkRiskHints: string[];
+  attachmentCount: number;
+  attachments: AttachmentRiskMetadata[];
+  attachmentRiskHints: string[];
 };
 
 export type AggregateItem = {

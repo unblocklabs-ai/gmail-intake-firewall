@@ -136,6 +136,43 @@ test("safe client-dev email gets tagged and wake_now", async () => {
   assert.equal("bodyText" in wake.payload, false);
 });
 
+test("artifact analysis is attached to decisions and sanitized wake payloads", async () => {
+  const message: InboundMessage = {
+    ...baseMessage,
+    bodyText: "Please verify this invoice at http://bit.ly/login-reset",
+    linkUrls: ["http://bit.ly/login-reset"],
+    attachments: [
+      { id: "att-1", filename: "invoice.pdf.exe", mimeType: "application/pdf", size: 42 },
+    ],
+  };
+  const result = await processMessage(message, config(), createEmptyState(), {
+    securityClassifier: security({
+      verdict: "safe",
+      riskScore: 0.1,
+      categories: [],
+      reasons: ["safe enough for fixture"],
+      safeSummary: "Client sent an invoice link and attachment.",
+      suspiciousSignals: [],
+    }),
+    routerClassifier: router({
+      tags: ["client-dev"],
+      wakeMode: "wake_now",
+      wakeTarget: "agent:dev",
+      sanitizedSummary: "Client sent an invoice link and attachment.",
+      reasons: ["Matches client-dev"],
+    }),
+  });
+
+  assert.ok(result.decision?.artifactAnalysis?.links[0]?.riskHints.includes("url_shortener"));
+  assert.ok(result.decision?.artifactAnalysis?.attachments[0]?.riskHints.includes("executable_attachment"));
+  const wake = result.decision?.actions.find((action) => action.type === "agent_wake");
+  assert.equal(wake?.type, "agent_wake");
+  assert.equal(wake.payload.artifacts?.linkCount, 1);
+  assert.deepEqual(wake.payload.artifacts?.linkDomains, ["bit.ly"]);
+  assert.ok(wake.payload.artifacts?.attachmentRiskHints.includes("executable_attachment"));
+  assert.equal("bodyText" in wake.payload, false);
+});
+
 test("prompt injection email is quarantined and not normally woken", async () => {
   const result = await processMessage(baseMessage, config(), createEmptyState(), {
     securityClassifier: security({

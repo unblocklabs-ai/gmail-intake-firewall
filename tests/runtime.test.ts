@@ -132,6 +132,7 @@ test("runtime quarantine review returns safe payload and records text feedback",
         bodyText: "RAW SECRET BODY SHOULD NOT LEAK",
         snippet: "Snippet should not be used in review payload",
         linkUrls: ["https://phish.example/login"],
+        attachments: [{ id: "att-1", filename: "invoice.pdf.exe", mimeType: "application/pdf", size: 42 }],
       };
     },
     async applyLabel() {},
@@ -169,6 +170,8 @@ test("runtime quarantine review returns safe payload and records text feedback",
   assert.equal(JSON.stringify(listed).includes("RAW SECRET BODY"), false);
   assert.equal(JSON.stringify(listed).includes("Snippet should not"), false);
   assert.deepEqual(listed[0]?.linkDomains, ["phish.example"]);
+  assert.deepEqual(listed[0]?.linkRiskHints, ["suspicious_keyword:login"]);
+  assert.deepEqual(listed[0]?.attachmentRiskHints, ["executable_attachment", "double_extension", "mime_extension_mismatch"]);
 
   const feedback = runtime.recordReviewFeedback({
     sourceId: "primary",
@@ -182,6 +185,53 @@ test("runtime quarantine review returns safe payload and records text feedback",
   const item = runtime.getQuarantineItem("primary", "msg-review").item as Record<string, unknown>;
   const events = item.feedback as Array<Record<string, unknown>>;
   assert.equal(events[0]?.feedbackType, "mute_sender");
+  assert.equal(JSON.stringify(item).includes("RAW SECRET BODY"), false);
+  assert.equal(JSON.stringify(item).includes("invoice.pdf.exe"), true);
+  assert.equal(JSON.stringify(item).includes("executable_attachment"), true);
+});
+
+test("runtime persists artifact analysis in decision logs", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    sources: [{ id: "primary", accountEmail: "user@example.com" }],
+  });
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        return [{ id: "msg-artifact", threadId: "thread-artifact" }];
+      },
+      async fetchMessage(candidate) {
+        return {
+          ...message(candidate.id),
+          bodyText: "Please verify http://bit.ly/account",
+          linkUrls: ["http://bit.ly/account"],
+          attachments: [{ id: "att-1", filename: "payload.js", mimeType: "application/javascript" }],
+        };
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    securityClassifier: { classify: async () => safeSecurity },
+    routerClassifier: {
+      classify: async () => ({
+        tags: [],
+        wakeMode: "none",
+        sanitizedSummary: "Safe runtime message.",
+        reasons: [],
+      }),
+    },
+  });
+
+  await runtime.runOnce();
+  const decision = stateStore.listDecisions("primary", "msg-artifact", 1)[0] as Record<string, unknown>;
+  const artifactAnalysis = decision.artifactAnalysis as Record<string, unknown>;
+  assert.equal(Array.isArray(artifactAnalysis.links), true);
+  assert.equal(Array.isArray(artifactAnalysis.attachments), true);
+  assert.match(JSON.stringify(artifactAnalysis), /url_shortener/);
+  assert.match(JSON.stringify(artifactAnalysis), /script_attachment/);
 });
 
 test("runtime review operations stay isolated by source", async (t) => {
@@ -922,6 +972,57 @@ test("runtime setup watch stores history id without processing initial snapshot"
   assert.equal(stateStore.getSourceCursor("primary")?.historyId, "200");
 });
 
+test("runtime explicit watch setup uses configured labels and stores renewal metadata", async (t) => {
+  const stateStore = await tempStore(t);
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    watch: {
+      labelIds: ["INBOX", "IMPORTANT"],
+      labelFilterBehavior: "INCLUDE",
+      renewBeforeMs: 7200000,
+    },
+    sources: [{ id: "primary", accountEmail: "user@example.com", intakeMode: "watch", watchTopicName: "projects/x/topics/gmail" }],
+  });
+  const watchCalls: Array<{ topicName: string; labelIds?: string[]; behavior?: string }> = [];
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        return [];
+      },
+      async setupWatch(topicName, labelIds, behavior) {
+        watchCalls.push({
+          topicName,
+          ...(labelIds ? { labelIds } : {}),
+          ...(behavior ? { behavior } : {}),
+        });
+        return { historyId: "300", expiration: "2026-05-07T12:00:00.000Z" };
+      },
+      async fetchMessage() {
+        return message("msg-1");
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    now: () => new Date("2026-05-06T12:00:00.000Z"),
+  });
+
+  const result = await runtime.setupWatch({ sourceId: "primary" });
+  const cursor = stateStore.getSourceCursor("primary");
+
+  assert.equal(result.sources, 1);
+  assert.equal((result.results as Array<Record<string, unknown>>)[0]?.ok, true);
+  assert.deepEqual(watchCalls, [{
+    topicName: "projects/x/topics/gmail",
+    labelIds: ["INBOX", "IMPORTANT"],
+    behavior: "INCLUDE",
+  }]);
+  assert.equal(cursor?.historyId, "300");
+  assert.equal(cursor?.lastWatchRenewalAt, "2026-05-06T12:00:00.000Z");
+  assert.deepEqual(cursor?.watchLabelIds, ["INBOX", "IMPORTANT"]);
+});
+
 test("runtime drains old history before renewing an expiring watch", async (t) => {
   const stateStore = await tempStore(t);
   stateStore.setSourceCursor("primary", {
@@ -974,12 +1075,68 @@ test("runtime drains old history before renewing an expiring watch", async (t) =
   assert.equal(stateStore.getSourceCursor("primary")?.historyId, "200");
 });
 
+test("runtime explicit watch repair drains history only when due unless forced", async (t) => {
+  const stateStore = await tempStore(t);
+  stateStore.setSourceCursor("primary", {
+    mode: "watch",
+    historyId: "100",
+    watchExpiresAt: "2026-05-07T12:00:00.000Z",
+    lastNotificationAt: "2026-05-06T11:30:00.000Z",
+  });
+  const config = resolvePluginConfig({
+    dryRun: true,
+    sqlitePath: stateStore.path,
+    watch: { repairOnNoNotificationMs: 3600000 },
+    sources: [{ id: "primary", accountEmail: "user@example.com", intakeMode: "watch", watchTopicName: "projects/x/topics/gmail" }],
+  });
+  let historyCalls = 0;
+  const runtime = new GmailIntakePollingRuntime(config, {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() {
+        return [];
+      },
+      async listHistory(startHistoryId) {
+        historyCalls += 1;
+        assert.equal(startHistoryId, "100");
+        return { historyId: "110", candidates: [{ id: "msg-1", threadId: "thread-msg-1" }] };
+      },
+      async fetchMessage(candidate) {
+        return message(candidate.id);
+      },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    securityClassifier: { classify: async () => safeSecurity },
+    routerClassifier: {
+      classify: async () => ({
+        tags: [],
+        wakeMode: "none",
+        sanitizedSummary: "Safe runtime message.",
+        reasons: [],
+      }),
+    },
+    now: () => new Date("2026-05-06T12:00:00.000Z"),
+  });
+
+  const notDue = await runtime.repairWatch({ sourceId: "primary" });
+  const forced = await runtime.repairWatch({ sourceId: "primary", force: true });
+  const cursor = stateStore.getSourceCursor("primary");
+
+  assert.equal((notDue.results as Array<Record<string, unknown>>)[0]?.skipped, true);
+  assert.equal((forced.results as Array<Record<string, unknown>>)[0]?.ok, true);
+  assert.equal(historyCalls, 1);
+  assert.equal(cursor?.historyId, "110");
+  assert.equal(cursor?.lastRepairAt, "2026-05-06T12:00:00.000Z");
+});
+
 test("runtime status reports watch readiness", async (t) => {
   const stateStore = await tempStore(t);
   stateStore.setSourceCursor("primary", {
     mode: "watch",
     historyId: "100",
     watchExpiresAt: "2026-05-06T12:30:00.000Z",
+    lastNotificationAt: "2026-05-06T05:00:00.000Z",
   });
   const config = resolvePluginConfig({
     dryRun: true,
@@ -1005,6 +1162,8 @@ test("runtime status reports watch readiness", async (t) => {
   assert.equal(status.sources?.[0]?.readiness?.historyCursorPresent, true);
   assert.equal(status.sources?.[0]?.readiness?.watchActive, true);
   assert.equal(status.sources?.[0]?.readiness?.watchNeedsRenewal, true);
+  assert.equal(status.sources?.[0]?.readiness?.missedNotificationRepairDue, true);
+  assert.equal(status.sources?.[0]?.readiness?.watchAutoSetup, true);
 });
 
 test("runtime repairs stale Gmail history with bounded lookback poll", async (t) => {

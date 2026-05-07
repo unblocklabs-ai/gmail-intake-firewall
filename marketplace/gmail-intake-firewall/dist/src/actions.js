@@ -1,4 +1,4 @@
-export function buildQuarantineActions(message, classification, config, source) {
+export function buildQuarantineActions(message, classification, config, source, artifactAnalysis) {
     const actions = [];
     if (canApplyGmailModifications(source) && source.gmailActions.applyLabels) {
         actions.push({ type: "gmail_label", label: config.security.quarantineLabel, messageId: message.messageId });
@@ -8,7 +8,7 @@ export function buildQuarantineActions(message, classification, config, source) 
     }
     for (const sink of config.alertSinks.filter((candidate) => candidate.enabled)) {
         if (sink.kind === "local_log") {
-            actions.push({ type: "local_log", summary: classification.safeSummary, payload: buildSuspiciousAlertPayload(message, classification, config.security.includeSnippetInAlerts) });
+            actions.push({ type: "local_log", summary: classification.safeSummary, payload: buildSuspiciousAlertPayload(message, classification, config.security.includeSnippetInAlerts, artifactAnalysis) });
             continue;
         }
         if (sink.kind === "slack") {
@@ -16,7 +16,7 @@ export function buildQuarantineActions(message, classification, config, source) 
                 type: "human_alert",
                 sink: "slack",
                 summary: classification.safeSummary,
-                payload: buildSuspiciousAlertPayload(message, classification, config.security.includeSnippetInAlerts),
+                payload: buildSuspiciousAlertPayload(message, classification, config.security.includeSnippetInAlerts, artifactAnalysis),
             };
             const target = sink.target ?? config.security.alertTarget;
             if (target) {
@@ -26,7 +26,7 @@ export function buildQuarantineActions(message, classification, config, source) 
         }
     }
     if (!actions.some((action) => action.type === "human_alert" || action.type === "local_log")) {
-        actions.push({ type: "local_log", summary: classification.safeSummary, payload: buildSuspiciousAlertPayload(message, classification, config.security.includeSnippetInAlerts) });
+        actions.push({ type: "local_log", summary: classification.safeSummary, payload: buildSuspiciousAlertPayload(message, classification, config.security.includeSnippetInAlerts, artifactAnalysis) });
     }
     return actions;
 }
@@ -114,7 +114,7 @@ function isRequiredExecutableAction(action) {
         || action.type === "human_alert"
         || action.type === "agent_wake";
 }
-export function buildSafeRoutingActions(message, routing, security, tags, wakeTargets, source) {
+export function buildSafeRoutingActions(message, routing, security, tags, wakeTargets, source, artifactAnalysis) {
     const actions = [];
     const policy = resolveRoutingPolicy(routing, tags, wakeTargets);
     for (const tag of policy.tags) {
@@ -126,7 +126,7 @@ export function buildSafeRoutingActions(message, routing, security, tags, wakeTa
         const wakeAction = {
             type: "agent_wake",
             target: policy.wakeTarget.id,
-            payload: buildWakePayload(message, routing, security),
+            payload: buildWakePayload(message, routing, security, artifactAnalysis),
         };
         wakeAction.payload.wakeTarget = policy.wakeTarget;
         actions.push(wakeAction);
@@ -153,7 +153,7 @@ export function buildSafeRoutingActions(message, routing, security, tags, wakeTa
 function canApplyGmailModifications(source) {
     return source.gmailActions.enabled && source.gmailActions.hasModifyScope;
 }
-function buildWakePayload(message, routing, security) {
+function buildWakePayload(message, routing, security, artifactAnalysis) {
     const payload = {
         sourceId: message.sourceId,
         accountEmail: message.accountEmail,
@@ -163,6 +163,10 @@ function buildWakePayload(message, routing, security) {
         sanitizedSummary: routing.sanitizedSummary,
         security,
     };
+    const artifactSummary = buildArtifactWakeSummary(artifactAnalysis);
+    if (artifactSummary) {
+        payload.artifacts = artifactSummary;
+    }
     if (message.subject) {
         payload.subject = message.subject;
     }
@@ -210,7 +214,8 @@ function buildAggregateItem(message, routing) {
     }
     return item;
 }
-function buildSuspiciousAlertPayload(message, classification, includeSnippet) {
+function buildSuspiciousAlertPayload(message, classification, includeSnippet, artifactAnalysis) {
+    const artifactSummary = buildArtifactWakeSummary(artifactAnalysis);
     const payload = {
         sourceId: message.sourceId,
         accountEmail: message.accountEmail,
@@ -230,7 +235,7 @@ function buildSuspiciousAlertPayload(message, classification, includeSnippet) {
             dkimSignature: findHeader(message.headers, "dkim-signature"),
             arcAuthenticationResults: findHeader(message.headers, "arc-authentication-results"),
         },
-        linkDomains: Array.from(new Set((message.linkUrls ?? []).flatMap((url) => {
+        linkDomains: artifactSummary?.linkDomains ?? Array.from(new Set((message.linkUrls ?? []).flatMap((url) => {
             try {
                 return [new URL(url).hostname.toLowerCase()];
             }
@@ -238,7 +243,11 @@ function buildSuspiciousAlertPayload(message, classification, includeSnippet) {
                 return [];
             }
         }))),
-        attachments: message.attachments,
+        links: artifactAnalysis?.links,
+        linkRiskHints: artifactSummary?.linkRiskHints,
+        attachments: artifactAnalysis?.attachments ?? message.attachments,
+        attachmentRiskHints: artifactSummary?.attachmentRiskHints,
+        artifactNotes: artifactAnalysis?.notes,
         riskReasons: classification.reasons,
         suspiciousSignals: classification.suspiciousSignals,
         sanitizedSummary: classification.safeSummary,
@@ -247,6 +256,19 @@ function buildSuspiciousAlertPayload(message, classification, includeSnippet) {
         payload.snippet = message.snippet;
     }
     return payload;
+}
+function buildArtifactWakeSummary(artifactAnalysis) {
+    if (!artifactAnalysis) {
+        return undefined;
+    }
+    return {
+        linkCount: artifactAnalysis.links.length,
+        linkDomains: Array.from(new Set(artifactAnalysis.links.map((link) => link.domain).filter(Boolean))),
+        linkRiskHints: Array.from(new Set(artifactAnalysis.links.flatMap((link) => link.riskHints))),
+        attachmentCount: artifactAnalysis.attachments.length,
+        attachments: artifactAnalysis.attachments,
+        attachmentRiskHints: Array.from(new Set(artifactAnalysis.attachments.flatMap((attachment) => attachment.riskHints))),
+    };
 }
 function findHeader(headers, name) {
     const lowerName = name.toLowerCase();

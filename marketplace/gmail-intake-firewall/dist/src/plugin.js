@@ -119,11 +119,14 @@ function buildOperatorStatusTool(service) {
         properties: {
             operation: {
                 type: "string",
-                enum: ["status", "probe", "validateConfig", "checkSourceAuth"],
+                enum: ["status", "probe", "validateConfig", "checkSourceAuth", "setupWatch", "renewWatch", "renewAllWatches", "repairWatch"],
                 default: "status",
             },
             sourceId: {
                 type: "string",
+            },
+            force: {
+                type: "boolean",
             },
         },
     };
@@ -143,6 +146,24 @@ function buildOperatorStatusTool(service) {
                 ? normalizedInput.sourceId
                 : undefined;
             return service.checkSourceAuth(sourceId ? { sourceId } : {});
+        }
+        if (operation === "setupWatch") {
+            return service.setupWatch({
+                ...(typeof normalizedInput?.sourceId === "string" ? { sourceId: normalizedInput.sourceId } : {}),
+                ...(typeof normalizedInput?.force === "boolean" ? { force: normalizedInput.force } : {}),
+            });
+        }
+        if (operation === "renewWatch" || operation === "renewAllWatches") {
+            return service.renewWatch({
+                ...(typeof normalizedInput?.sourceId === "string" ? { sourceId: normalizedInput.sourceId } : {}),
+                ...(typeof normalizedInput?.force === "boolean" ? { force: normalizedInput.force } : {}),
+            });
+        }
+        if (operation === "repairWatch") {
+            return service.repairWatch({
+                ...(typeof normalizedInput?.sourceId === "string" ? { sourceId: normalizedInput.sourceId } : {}),
+                ...(typeof normalizedInput?.force === "boolean" ? { force: normalizedInput.force } : {}),
+            });
         }
         return service.status();
     };
@@ -520,6 +541,45 @@ function buildGmailIntakeFirewallService(config, host, logger) {
                     ...notification,
                     ...(typeof options.force === "boolean" ? { force: options.force } : {}),
                     ...(typeof options.dryRun === "boolean" ? { dryRun: options.dryRun } : {}),
+                }),
+            };
+        },
+        async setupWatch(options) {
+            if (!runtime) {
+                throw new Error("gmail-intake-firewall service is not started");
+            }
+            return {
+                ok: true,
+                service: "gmail-intake-firewall-service",
+                ...await runtime.setupWatch({
+                    ...(typeof options.sourceId === "string" ? { sourceId: options.sourceId } : {}),
+                    ...(typeof options.force === "boolean" ? { force: options.force } : {}),
+                }),
+            };
+        },
+        async renewWatch(options) {
+            if (!runtime) {
+                throw new Error("gmail-intake-firewall service is not started");
+            }
+            return {
+                ok: true,
+                service: "gmail-intake-firewall-service",
+                ...await runtime.renewWatch({
+                    ...(typeof options.sourceId === "string" ? { sourceId: options.sourceId } : {}),
+                    ...(typeof options.force === "boolean" ? { force: options.force } : {}),
+                }),
+            };
+        },
+        async repairWatch(options) {
+            if (!runtime) {
+                throw new Error("gmail-intake-firewall service is not started");
+            }
+            return {
+                ok: true,
+                service: "gmail-intake-firewall-service",
+                ...await runtime.repairWatch({
+                    ...(typeof options.sourceId === "string" ? { sourceId: options.sourceId } : {}),
+                    ...(typeof options.force === "boolean" ? { force: options.force } : {}),
                 }),
             };
         },

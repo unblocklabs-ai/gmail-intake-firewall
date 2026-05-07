@@ -17,6 +17,9 @@ type CapturedService = {
   inspectMessage(options: Record<string, unknown>): Promise<Record<string, unknown>>;
   replayEvent(options: Record<string, unknown>): Promise<Record<string, unknown>>;
   handleGmailNotification(options: Record<string, unknown>): Promise<Record<string, unknown>>;
+  setupWatch(options: Record<string, unknown>): Promise<Record<string, unknown>>;
+  renewWatch(options: Record<string, unknown>): Promise<Record<string, unknown>>;
+  repairWatch(options: Record<string, unknown>): Promise<Record<string, unknown>>;
 };
 type CapturedHttpRoute = {
   id: string;

@@ -54,3 +54,60 @@ test("security alert snippets are opt-in and disabled by default", () => {
   assert.equal(resolvePluginConfig({}).security.includeSnippetInAlerts, false);
   assert.equal(resolvePluginConfig({ security: { includeSnippetInAlerts: true } }).security.includeSnippetInAlerts, true);
 });
+
+test("artifact sandbox config defaults to local analysis and rejects fetching/downloading", () => {
+  const defaults = resolvePluginConfig({});
+  assert.deepEqual(defaults.artifacts, {
+    analyzeLinks: true,
+    analyzeAttachments: true,
+    fetchLinks: false,
+    downloadAttachments: false,
+    maxDisplayedUrlChars: 160,
+  });
+
+  const config = resolvePluginConfig({
+    artifacts: {
+      fetchLinks: true,
+      downloadAttachments: true,
+    },
+  });
+  const findings = validatePluginConfig(config);
+  assert.deepEqual(findings.filter((finding) => finding.path.startsWith("artifacts.")).map((finding) => finding.path).sort(), [
+    "artifacts.downloadAttachments",
+    "artifacts.fetchLinks",
+  ]);
+});
+
+test("watch lifecycle config defaults and validation cover production setup gaps", () => {
+  const defaults = resolvePluginConfig({});
+  assert.deepEqual(defaults.watch, {
+    autoSetup: true,
+    renewBeforeMs: 86400000,
+    repairOnNoNotificationMs: 21600000,
+    labelIds: ["INBOX"],
+    labelFilterBehavior: "INCLUDE",
+  });
+
+  const config = resolvePluginConfig({
+    webhookSecret: "secret",
+    watch: {
+      renewBeforeMs: 1000,
+      labelIds: ["INBOX", "IMPORTANT"],
+      labelFilterBehavior: "EXCLUDE",
+    },
+    sources: [{
+      id: "primary",
+      accountEmail: "user@example.com",
+      authRef: { source: "openclaw", provider: "secrets", id: "gmail-primary" },
+      intakeMode: "watch",
+      watchTopicName: "bad-topic",
+    }],
+  });
+
+  assert.deepEqual(config.watch.labelIds, ["INBOX", "IMPORTANT"]);
+  assert.equal(config.watch.labelFilterBehavior, "EXCLUDE");
+  const findings = validatePluginConfig(config);
+  assert.equal(findings.some((finding) => finding.path === "sources.primary.watchTopicName" && finding.severity === "warning"), true);
+  assert.equal(findings.some((finding) => finding.path === "sources.primary.historyLookback" && finding.severity === "warning"), true);
+  assert.equal(findings.some((finding) => finding.path === "watch.renewBeforeMs" && finding.severity === "warning"), true);
+});

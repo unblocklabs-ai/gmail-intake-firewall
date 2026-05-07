@@ -66,8 +66,8 @@ export function openSqliteStateStore(path) {
         recordDecisionPlan(decision) {
             db.prepare(`INSERT INTO decisions (
           processed_at, source_id, account_email, message_id, thread_id, security_json,
-          routing_json, actions_json, dry_run
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(decision.processedAt, decision.sourceId, decision.accountEmail, decision.messageId, decision.threadId, JSON.stringify(decision.security), decision.routing ? JSON.stringify(decision.routing) : null, JSON.stringify(decision.actions), decision.dryRun ? 1 : 0);
+          routing_json, artifact_analysis_json, actions_json, dry_run
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(decision.processedAt, decision.sourceId, decision.accountEmail, decision.messageId, decision.threadId, JSON.stringify(decision.security), decision.routing ? JSON.stringify(decision.routing) : null, decision.artifactAnalysis ? JSON.stringify(decision.artifactAnalysis) : null, JSON.stringify(decision.actions), decision.dryRun ? 1 : 0);
             for (const action of decision.actions) {
                 if (action.type === "aggregate_enqueue") {
                     this.enqueueAggregate(action.item);
@@ -279,13 +279,13 @@ export function openSqliteStateStore(path) {
         listQuarantine(limit = 25, sourceId) {
             const rows = sourceId
                 ? db.prepare(`SELECT id, processed_at, source_id, account_email, message_id, thread_id,
-            security_json, routing_json, actions_json, dry_run
+            security_json, routing_json, artifact_analysis_json, actions_json, dry_run
            FROM decisions
            WHERE routing_json IS NULL AND source_id = ?
            ORDER BY id DESC
            LIMIT ?`).all?.(sourceId, limit) ?? []
                 : db.prepare(`SELECT id, processed_at, source_id, account_email, message_id, thread_id,
-            security_json, routing_json, actions_json, dry_run
+            security_json, routing_json, artifact_analysis_json, actions_json, dry_run
            FROM decisions
            WHERE routing_json IS NULL
            ORDER BY id DESC
@@ -319,7 +319,7 @@ export function openSqliteStateStore(path) {
         },
         listDecisions(sourceId, messageId, limit = 10) {
             const rows = db.prepare(`SELECT id, processed_at, source_id, account_email, message_id, thread_id,
-          security_json, routing_json, actions_json, dry_run
+          security_json, routing_json, artifact_analysis_json, actions_json, dry_run
          FROM decisions
          WHERE source_id = ? AND message_id = ?
          ORDER BY id DESC
@@ -406,6 +406,7 @@ function initializeSchema(db) {
       thread_id TEXT NOT NULL,
       security_json TEXT NOT NULL,
       routing_json TEXT,
+      artifact_analysis_json TEXT,
       actions_json TEXT NOT NULL,
       dry_run INTEGER NOT NULL
     );
@@ -487,6 +488,12 @@ function initializeSchema(db) {
     catch {
         // Existing databases may already have the Phase 2 cadence column.
     }
+    try {
+        db.exec("ALTER TABLE decisions ADD COLUMN artifact_analysis_json TEXT;");
+    }
+    catch {
+        // Existing databases may already have the artifact analysis column.
+    }
     db.exec(`
     INSERT INTO action_attempts (
       source_id, message_id, processed_at, action_index, action_type, required,
@@ -558,6 +565,7 @@ function normalizeDecisionRow(row) {
         threadId: row.thread_id,
         security: parseJson(row.security_json),
         routing: parseJson(row.routing_json),
+        artifactAnalysis: parseJson(row.artifact_analysis_json),
         actions: parseJson(row.actions_json),
         dryRun: Boolean(row.dry_run),
     };

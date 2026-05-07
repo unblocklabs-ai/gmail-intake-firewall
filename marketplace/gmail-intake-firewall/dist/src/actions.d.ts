@@ -1,5 +1,5 @@
-import type { AgentWakePayload, InboundMessage, PlannedAction, PluginConfig, RoutingClassification, SecurityClassification, GmailSourceConfig, TagConfig, WakeTargetConfig } from "./types.js";
-export declare function buildQuarantineActions(message: InboundMessage, classification: SecurityClassification, config: PluginConfig, source: GmailSourceConfig): PlannedAction[];
+import type { AgentWakePayload, ArtifactAnalysis, InboundMessage, PlannedAction, PluginConfig, RoutingClassification, SecurityClassification, GmailSourceConfig, TagConfig, WakeTargetConfig } from "./types.js";
+export declare function buildQuarantineActions(message: InboundMessage, classification: SecurityClassification, config: PluginConfig, source: GmailSourceConfig, artifactAnalysis?: ArtifactAnalysis): PlannedAction[];
 export type ActionExecutorDeps = {
     gmail?: {
         applyLabel(messageId: string, label: string): Promise<void>;
@@ -26,5 +26,5 @@ export type ActionExecutionStatus = {
 };
 export declare function executePlannedActions(actions: PlannedAction[], dryRun: boolean, deps: ActionExecutorDeps): Promise<ActionExecutionStatus[]>;
 export declare function requiredActionsSucceeded(results: ActionExecutionStatus[]): boolean;
-export declare function buildSafeRoutingActions(message: InboundMessage, routing: RoutingClassification, security: SecurityClassification, tags: TagConfig[], wakeTargets: WakeTargetConfig[], source: GmailSourceConfig): PlannedAction[];
+export declare function buildSafeRoutingActions(message: InboundMessage, routing: RoutingClassification, security: SecurityClassification, tags: TagConfig[], wakeTargets: WakeTargetConfig[], source: GmailSourceConfig, artifactAnalysis?: ArtifactAnalysis): PlannedAction[];
 //# sourceMappingURL=actions.d.ts.map

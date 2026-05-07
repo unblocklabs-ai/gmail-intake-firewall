@@ -388,6 +388,80 @@
           }
         },
         "default": {}
+      },
+      "artifacts": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "analyzeLinks": {
+            "type": "boolean",
+            "default": true,
+            "description": "Run local non-fetching structural link analysis."
+          },
+          "analyzeAttachments": {
+            "type": "boolean",
+            "default": true,
+            "description": "Run local metadata-only attachment analysis."
+          },
+          "fetchLinks": {
+            "type": "boolean",
+            "default": false,
+            "description": "Reserved for future sandboxing; must remain false in this version."
+          },
+          "downloadAttachments": {
+            "type": "boolean",
+            "default": false,
+            "description": "Reserved for future sandboxing; must remain false in this version."
+          },
+          "maxDisplayedUrlChars": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 160
+          }
+        },
+        "default": {}
+      },
+      "watch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "autoSetup": {
+            "type": "boolean",
+            "default": true,
+            "description": "Automatically create or renew Gmail watches for watch-mode sources during runtime polling."
+          },
+          "renewBeforeMs": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 86400000,
+            "description": "Renew Gmail watches this many milliseconds before Gmail's reported expiration."
+          },
+          "repairOnNoNotificationMs": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 21600000,
+            "description": "Mark watch sources repair-due after this long without notification/history/repair activity."
+          },
+          "labelIds": {
+            "type": "array",
+            "default": [
+              "INBOX"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Gmail labels used when registering the watch."
+          },
+          "labelFilterBehavior": {
+            "type": "string",
+            "enum": [
+              "INCLUDE",
+              "EXCLUDE"
+            ],
+            "default": "INCLUDE"
+          }
+        },
+        "default": {}
       }
     }
   }

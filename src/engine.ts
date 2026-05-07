@@ -32,7 +32,7 @@ export async function processMessage(
     return { state, skipped: true, skipReason: "already_processed" };
   }
 
-  const normalized = normalizeMessageForSecurity(message, config.security.maxBodyChars);
+  const normalized = normalizeMessageForSecurity(message, config.security.maxBodyChars, config.artifacts);
   const security = await deps.securityClassifier.classify(normalized);
   const quarantined = shouldQuarantine(security, config.security);
   const routing = quarantined
@@ -44,8 +44,8 @@ export async function processMessage(
       deps.routingPreferences ?? [],
     );
   const actions = quarantined
-    ? buildQuarantineActions(message, security, config, source)
-    : buildSafeRoutingActions(message, routing!, security, config.tags, config.wakeTargets, source);
+    ? buildQuarantineActions(message, security, config, source, normalized.artifactAnalysis)
+    : buildSafeRoutingActions(message, routing!, security, config.tags, config.wakeTargets, source, normalized.artifactAnalysis);
 
   const decision: DecisionLogEntry = {
     processedAt: (deps.now ?? (() => new Date()))().toISOString(),
@@ -54,6 +54,7 @@ export async function processMessage(
     messageId: message.messageId,
     threadId: message.threadId,
     security,
+    artifactAnalysis: normalized.artifactAnalysis,
     actions,
     dryRun: config.dryRun,
   };

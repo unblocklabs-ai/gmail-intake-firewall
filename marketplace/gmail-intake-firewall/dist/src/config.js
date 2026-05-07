@@ -28,6 +28,20 @@ const DEFAULT_CONFIG = {
         maxDigestItems: 50,
         timezone: "UTC",
     },
+    artifacts: {
+        analyzeLinks: true,
+        analyzeAttachments: true,
+        fetchLinks: false,
+        downloadAttachments: false,
+        maxDisplayedUrlChars: 160,
+    },
+    watch: {
+        autoSetup: true,
+        renewBeforeMs: 24 * 60 * 60 * 1000,
+        repairOnNoNotificationMs: 6 * 60 * 60 * 1000,
+        labelIds: ["INBOX"],
+        labelFilterBehavior: "INCLUDE",
+    },
 };
 function asRecord(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -143,6 +157,16 @@ function normalizeAlertSinks(value) {
     });
     return sinks.length > 0 ? sinks : DEFAULT_CONFIG.alertSinks;
 }
+function normalizeStringArray(value, fallback) {
+    if (!Array.isArray(value)) {
+        return fallback;
+    }
+    const normalized = value.flatMap((entry) => {
+        const text = stringValue(entry);
+        return text ? [text] : [];
+    });
+    return normalized.length > 0 ? normalized : fallback;
+}
 function normalizeTags(value) {
     if (!Array.isArray(value)) {
         return [];
@@ -175,6 +199,8 @@ export function resolvePluginConfig(rawConfig) {
     const openaiApiKey = stringValue(raw.OPENAI_API_KEY);
     const webhookSecret = stringValue(raw.webhookSecret);
     const aggregateRaw = asRecord(raw.aggregate);
+    const artifactsRaw = asRecord(raw.artifacts);
+    const watchRaw = asRecord(raw.watch);
     const security = {
         quarantineLabel: stringValue(securityRaw.quarantineLabel) ?? DEFAULT_SECURITY.quarantineLabel,
         maxBodyChars: positiveInteger(securityRaw.maxBodyChars, DEFAULT_SECURITY.maxBodyChars),
@@ -209,6 +235,27 @@ export function resolvePluginConfig(rawConfig) {
             maxDigestItems: positiveInteger(aggregateRaw.maxDigestItems, DEFAULT_CONFIG.aggregate.maxDigestItems),
             timezone: stringValue(aggregateRaw.timezone) ?? DEFAULT_CONFIG.aggregate.timezone,
         },
+        artifacts: normalizeArtifacts(artifactsRaw),
+        watch: normalizeWatch(watchRaw),
+    };
+}
+function normalizeArtifacts(raw) {
+    return {
+        analyzeLinks: booleanValue(raw.analyzeLinks, DEFAULT_CONFIG.artifacts.analyzeLinks),
+        analyzeAttachments: booleanValue(raw.analyzeAttachments, DEFAULT_CONFIG.artifacts.analyzeAttachments),
+        fetchLinks: booleanValue(raw.fetchLinks, DEFAULT_CONFIG.artifacts.fetchLinks),
+        downloadAttachments: booleanValue(raw.downloadAttachments, DEFAULT_CONFIG.artifacts.downloadAttachments),
+        maxDisplayedUrlChars: positiveInteger(raw.maxDisplayedUrlChars, DEFAULT_CONFIG.artifacts.maxDisplayedUrlChars),
+    };
+}
+function normalizeWatch(raw) {
+    const labelFilterBehavior = raw.labelFilterBehavior === "EXCLUDE" ? "EXCLUDE" : "INCLUDE";
+    return {
+        autoSetup: booleanValue(raw.autoSetup, DEFAULT_CONFIG.watch.autoSetup),
+        renewBeforeMs: positiveInteger(raw.renewBeforeMs, DEFAULT_CONFIG.watch.renewBeforeMs),
+        repairOnNoNotificationMs: positiveInteger(raw.repairOnNoNotificationMs, DEFAULT_CONFIG.watch.repairOnNoNotificationMs),
+        labelIds: normalizeStringArray(raw.labelIds, DEFAULT_CONFIG.watch.labelIds),
+        labelFilterBehavior,
     };
 }
 export function validatePluginConfig(config) {
@@ -234,6 +281,20 @@ export function validatePluginConfig(config) {
                 message: "watch intakeMode requires watchTopicName.",
             });
         }
+        if (source.intakeMode === "watch" && !source.historyLookback) {
+            findings.push({
+                severity: "warning",
+                path: `sources.${source.id}.historyLookback`,
+                message: "watch intakeMode should configure historyLookback so stale history cursors can repair with a bounded poll.",
+            });
+        }
+        if (source.intakeMode === "watch" && !/^projects\/[^/]+\/topics\/[^/]+$/.test(source.watchTopicName ?? "")) {
+            findings.push({
+                severity: "warning",
+                path: `sources.${source.id}.watchTopicName`,
+                message: "watchTopicName should use the fully-qualified Pub/Sub topic format projects/{project}/topics/{topic}.",
+            });
+        }
         if (source.intakeMode === "watch" && !config.webhookSecret) {
             findings.push({
                 severity: "warning",
@@ -248,6 +309,13 @@ export function validatePluginConfig(config) {
                 message: "Gmail write actions are configured but hasModifyScope is false; label/archive actions will degrade to log/alert only.",
             });
         }
+    }
+    if (config.watch.renewBeforeMs < 60 * 60 * 1000) {
+        findings.push({
+            severity: "warning",
+            path: "watch.renewBeforeMs",
+            message: "renewBeforeMs is less than one hour; production Gmail watches should renew with a larger buffer.",
+        });
     }
     for (const tag of config.tags) {
         if (tag.wakeTarget && !wakeTargetIds.has(tag.wakeTarget)) {
@@ -284,6 +352,20 @@ export function validatePluginConfig(config) {
             severity: "error",
             path: "aggregate.timezone",
             message: `Invalid IANA timezone "${config.aggregate.timezone}".`,
+        });
+    }
+    if (config.artifacts.fetchLinks) {
+        findings.push({
+            severity: "error",
+            path: "artifacts.fetchLinks",
+            message: "Link fetching is not supported in this version; keep fetchLinks false.",
+        });
+    }
+    if (config.artifacts.downloadAttachments) {
+        findings.push({
+            severity: "error",
+            path: "artifacts.downloadAttachments",
+            message: "Attachment downloading is not supported in this version; keep downloadAttachments false.",
         });
     }
     return findings;
