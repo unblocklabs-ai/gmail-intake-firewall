@@ -95,12 +95,14 @@ Current gateway-compatible secret refs are inline credential objects, env refs, 
 }
 ```
 
-For example, set `GMAIL_PRIMARY_OAUTH_JSON` to that JSON and configure `"authRef": { "source": "env", "id": "GMAIL_PRIMARY_OAUTH_JSON" }`. A file ref may use `"authRef": { "source": "file", "id": "/secure/path/gmail-primary.json" }`. The plugin still supports host-injected secret resolvers when OpenClaw provides one, but it no longer requires that undocumented runtime surface for gateway Pub/Sub processing.
+For example, set `GMAIL_PRIMARY_OAUTH_JSON` to that JSON and configure `"authRef": { "source": "env", "provider": "env", "id": "GMAIL_PRIMARY_OAUTH_JSON" }`. A file ref may use `"authRef": { "source": "file", "provider": "file", "id": "/secure/path/gmail-primary.json" }`. The plugin still supports host-injected secret resolvers when OpenClaw provides one, but it no longer requires that undocumented runtime surface for gateway Pub/Sub processing.
 
 Service methods:
 
 - `validateConfig()` returns actionable config errors/warnings for duplicate ids, missing wake targets, invalid aggregate cadences, invalid timezones, watch mode without a topic, and likely Gmail scope mismatches.
 - `status()` reports configured sources, per-source cursor/state, last poll status/error stage, pending aggregate count, processed counts, quarantine counts, failed action attempts, and aggregate timezone.
+- `doctor()` combines config validation, redacted auth readiness, last poll/watch diagnostics, dry-run state, Gmail scope readiness, and suggested watch operations into one operator health report.
+- `supportBundle()` returns a redacted troubleshooting payload with validation, runtime readiness, auth readiness, status, review counters, and safe notes. It excludes raw bodies, raw HTML, attachment contents, OAuth tokens, client secrets, and API keys.
 - `setupWatch({ sourceId, force })` explicitly registers a Gmail watch for one watch-mode source, stores Gmail's returned `historyId`/expiration, and does not process the initial mailbox snapshot.
 - `renewWatch({ sourceId, force })` renews one source when the configured renewal window is due, or all watch sources when no `sourceId` is supplied. Renewal drains old history before calling Gmail `watch`.
 - `repairWatch({ sourceId, force })` runs a bounded history repair for watch-mode sources that have gone too long without notification/history/repair activity.
@@ -113,7 +115,7 @@ Service methods:
 
 Review tool:
 
-- `gmail_intake_firewall_status` is read-only status/probe/config/auth inspection.
+- `gmail_intake_firewall_status` is read-only status/probe/config/auth inspection plus `doctor` and `supportBundle` diagnostics.
 - `gmail_intake_firewall_review` is the write-capable text review tool. Supported operations: `listQuarantine`, `getQuarantineItem`, `reviewSummary`, `recordFeedback`, `markHarmful`, `releaseFromQuarantine`, `replayWithFeedback`, `wakeNow`, `muteSender`, `unmuteSender`, `alwaysAggregate`, `removeAlwaysAggregate`, `muteDomain`, `unmuteDomain`, `alwaysAggregateDomain`, `removeAlwaysAggregateDomain`, and `listPreferences`.
 - Review payloads are safe by default: metadata, auth headers, link domains, attachment metadata, risk reasons, sanitized summary, action history, and feedback history. They do not include full raw body, raw HTML, or attachment contents.
 - `muteSender`, `alwaysAggregate`, and their domain variants create preferences that affect future safe routing only. They do not override the security classifier or release risky mail from quarantine. Use `unmuteSender`, `removeAlwaysAggregate`, and the matching domain removals to clear active preferences.
@@ -153,7 +155,7 @@ Plugin config shape:
       "intakeMode": "watch",
       "watchTopicName": "projects/my-project/topics/gmail-intake",
       "historyLookback": "2d",
-      "authRef": { "source": "env", "id": "GMAIL_PRIMARY_OAUTH_JSON" }
+      "authRef": { "source": "env", "provider": "env", "id": "GMAIL_PRIMARY_OAUTH_JSON" }
     }
   ]
 }
@@ -201,14 +203,14 @@ Example policy skeleton:
 {
   "dryRun": true,
   "webhookSecret": "replace-with-long-random-secret",
-  "openaiApiKeyRef": { "source": "env", "id": "OPENAI_API_KEY" },
+  "openaiApiKeyRef": { "source": "env", "provider": "env", "id": "OPENAI_API_KEY" },
   "openai_model": "gpt-5.5",
   "sqlitePath": "~/.openclaw/gmail-intake-firewall/state.sqlite",
   "sources": [
     {
       "id": "primary",
       "accountEmail": "user@example.com",
-      "authRef": { "source": "env", "id": "GMAIL_PRIMARY_OAUTH_JSON" },
+      "authRef": { "source": "env", "provider": "env", "id": "GMAIL_PRIMARY_OAUTH_JSON" },
       "enabled": true,
       "candidateQuery": "in:inbox newer_than:7d",
       "intakeMode": "poll",

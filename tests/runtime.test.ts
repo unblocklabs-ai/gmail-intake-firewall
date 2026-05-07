@@ -1164,6 +1164,7 @@ test("runtime status reports watch readiness", async (t) => {
   assert.equal(status.sources?.[0]?.readiness?.watchNeedsRenewal, true);
   assert.equal(status.sources?.[0]?.readiness?.missedNotificationRepairDue, true);
   assert.equal(status.sources?.[0]?.readiness?.watchAutoSetup, true);
+  assert.deepEqual(status.sources?.[0]?.readiness?.suggestedOperations, ["renewWatch", "repairWatch"]);
 });
 
 test("runtime repairs stale Gmail history with bounded lookback poll", async (t) => {

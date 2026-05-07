@@ -12,6 +12,8 @@ type CapturedService = {
   probe(): Promise<Record<string, unknown>>;
   status(): Promise<Record<string, unknown>>;
   validateConfig(): Promise<Record<string, unknown>>;
+  doctor(): Promise<Record<string, unknown>>;
+  supportBundle(): Promise<Record<string, unknown>>;
   checkSourceAuth(options: Record<string, unknown>): Promise<Record<string, unknown>>;
   backfill(options: Record<string, unknown>): Promise<Record<string, unknown>>;
   inspectMessage(options: Record<string, unknown>): Promise<Record<string, unknown>>;
@@ -510,4 +512,97 @@ test("plugin service reports runtime readiness problems", async () => {
   assert.equal(Array.isArray(start.runtimeReadiness), true);
   assert.equal((start.runtimeReadiness as unknown[]).length > 0, true);
   assert.equal(Array.isArray(status.runtimeReadiness), true);
+});
+
+test("plugin doctor and support bundle expose redacted operator diagnostics", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gmail-intake-plugin-"));
+  let service: CapturedService | undefined;
+  const tools = new Map<string, { id: string; run(input: unknown): Promise<Record<string, unknown>> }>();
+  registerGmailIntakeFirewallPlugin({
+    pluginConfig: {
+      dryRun: true,
+      OPENAI_API_KEY: "test-key",
+      sqlitePath: join(dir, "state.sqlite"),
+      sources: [{
+        id: "primary",
+        accountEmail: "user@example.com",
+        authRef: {
+          refreshToken: "refresh-token",
+          clientId: "client-id",
+          clientSecret: "client-secret",
+          scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+        },
+        intakeMode: "watch",
+        watchTopicName: "projects/example/topics/gmail",
+      }],
+    },
+    registerService(candidate: unknown) {
+      service = candidate as typeof service;
+    },
+    registerTool(candidate: unknown) {
+      const tool = candidate as { id: string; run(input: unknown): Promise<Record<string, unknown>> };
+      tools.set(tool.id, tool);
+    },
+  });
+
+  assert.ok(service);
+  await service.start();
+  const doctor = await service.doctor();
+  const toolDoctor = await tools.get("gmail_intake_firewall_status")?.run({ operation: "doctor" });
+  const supportBundle = await service.supportBundle();
+  await service.stop();
+
+  assert.equal(doctor.ok, true);
+  assert.equal(toolDoctor?.service, "gmail-intake-firewall-service");
+  const findingMessages = JSON.stringify(doctor.findings);
+  assert.match(findingMessages, /dryRun is enabled/);
+  assert.match(findingMessages, /run setupWatch/);
+  assert.match(findingMessages, /resolved OAuth scopes do not allow Gmail modify/);
+  const serializedBundle = JSON.stringify(supportBundle);
+  assert.match(serializedBundle, /Support bundle is redacted/);
+  assert.doesNotMatch(serializedBundle, /refresh-token/);
+  assert.doesNotMatch(serializedBundle, /client-secret/);
+  assert.doesNotMatch(serializedBundle, /test-key/);
+});
+
+test("plugin doctor and support bundle redact secret-like auth errors", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gmail-intake-plugin-"));
+  let service: CapturedService | undefined;
+  registerGmailIntakeFirewallPlugin({
+    pluginConfig: {
+      dryRun: true,
+      OPENAI_API_KEY: "test-key",
+      sqlitePath: join(dir, "state.sqlite"),
+      sources: [{
+        id: "primary",
+        accountEmail: "user@example.com",
+        authRef: { source: "env", provider: "env", id: "MISSING_GMAIL_AUTH" },
+      }],
+    },
+    secrets: {
+      async resolveSecret() {
+        throw new Error("OAuth failed refresh_token=secret-refresh client_secret=secret-client api_key=secret-api Bearer abc123");
+      },
+    },
+    registerService(candidate: unknown) {
+      service = candidate as typeof service;
+    },
+  });
+
+  assert.ok(service);
+  await service.start();
+  const doctor = await service.doctor();
+  const supportBundle = await service.supportBundle();
+  await service.stop();
+
+  const doctorSerialized = JSON.stringify(doctor);
+  const bundleSerialized = JSON.stringify(supportBundle);
+  assert.match(doctorSerialized, /sources\.primary\.authRef/);
+  assert.match(bundleSerialized, /refresh_token= \[redacted\]/);
+  for (const serialized of [doctorSerialized, bundleSerialized]) {
+    assert.doesNotMatch(serialized, /secret-refresh/);
+    assert.doesNotMatch(serialized, /secret-client/);
+    assert.doesNotMatch(serialized, /secret-api/);
+    assert.doesNotMatch(serialized, /abc123/);
+  }
 });

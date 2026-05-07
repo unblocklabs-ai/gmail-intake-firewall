@@ -163,7 +163,7 @@ function buildOperatorStatusTool(service: ReturnType<typeof buildGmailIntakeFire
     properties: {
       operation: {
         type: "string",
-        enum: ["status", "probe", "validateConfig", "checkSourceAuth", "setupWatch", "renewWatch", "renewAllWatches", "repairWatch"],
+        enum: ["status", "probe", "validateConfig", "checkSourceAuth", "doctor", "supportBundle", "setupWatch", "renewWatch", "renewAllWatches", "repairWatch"],
         default: "status",
       },
       sourceId: {
@@ -190,6 +190,12 @@ function buildOperatorStatusTool(service: ReturnType<typeof buildGmailIntakeFire
         ? normalizedInput.sourceId
         : undefined;
       return service.checkSourceAuth(sourceId ? { sourceId } : {});
+    }
+    if (operation === "doctor") {
+      return service.doctor();
+    }
+    if (operation === "supportBundle") {
+      return service.supportBundle();
     }
     if (operation === "setupWatch") {
       return service.setupWatch({
@@ -413,6 +419,8 @@ function buildGmailIntakeFirewallService(
   probe: () => Promise<Record<string, unknown>>;
   status: () => Promise<Record<string, unknown>>;
   validateConfig: () => Promise<Record<string, unknown>>;
+  doctor: () => Promise<Record<string, unknown>>;
+  supportBundle: () => Promise<Record<string, unknown>>;
   backfill: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   inspectMessage: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   replayEvent: (options: Record<string, unknown>) => Promise<Record<string, unknown>>;
@@ -546,6 +554,48 @@ function buildGmailIntakeFirewallService(
         ok: !validation.some((finding) => finding.severity === "error"),
         service: "gmail-intake-firewall-service",
         validation,
+      };
+    },
+    async doctor() {
+      const validation = validatePluginConfig(config);
+      const status = await this.status();
+      const auth = await this.checkSourceAuth({});
+      const findings = buildDoctorFindings(config, validation, status, auth);
+      return {
+        ok: !findings.some((finding) => finding.severity === "error"),
+        service: "gmail-intake-firewall-service",
+        generatedAt: new Date().toISOString(),
+        summary: {
+          enabled: config.enabled,
+          dryRun: config.dryRun,
+          started: status.started === true,
+          configuredSources: config.sources.length,
+          errorCount: findings.filter((finding) => finding.severity === "error").length,
+          warningCount: findings.filter((finding) => finding.severity === "warning").length,
+        },
+        findings,
+        validation,
+        auth: redactSupportStatus(auth),
+      };
+    },
+    async supportBundle() {
+      const validation = validatePluginConfig(config);
+      const status = await this.status();
+      const auth = await this.checkSourceAuth({});
+      const review = runtime?.reviewSummary();
+      return {
+        ok: true,
+        service: "gmail-intake-firewall-service",
+        generatedAt: new Date().toISOString(),
+        validation: redactSupportStatus(validation),
+        runtimeReadiness: redactSupportStatus(runtimeReadiness),
+        auth: redactSupportStatus(auth),
+        status: redactSupportStatus(status),
+        review: redactSupportStatus(review),
+        notes: [
+          "Support bundle is redacted and excludes raw email bodies, raw HTML, attachment contents, OAuth tokens, client secrets, and API keys.",
+          "Share alongside gateway logs only after separately redacting deployment-specific secrets.",
+        ],
       };
     },
     async backfill(options) {
@@ -1067,4 +1117,123 @@ function sourceHasHostOnlyAuthRef(source: GmailSourceConfig): boolean {
   const sourceKind = typeof raw.source === "string" ? raw.source : undefined;
   const provider = typeof raw.provider === "string" ? raw.provider : undefined;
   return sourceKind !== "env" && sourceKind !== "file" && provider !== "env" && provider !== "file" && !raw.path;
+}
+
+function buildDoctorFindings(
+  config: ReturnType<typeof resolvePluginConfig>,
+  validation: RuntimeReadinessFinding[],
+  status: Record<string, unknown>,
+  auth: Record<string, unknown>,
+): RuntimeReadinessFinding[] {
+  const findings: RuntimeReadinessFinding[] = [...validation];
+  if (config.dryRun) {
+    findings.push({
+      severity: "warning",
+      path: "dryRun",
+      message: "dryRun is enabled; Gmail, Slack, local log, and agent wake mutations are intentionally skipped.",
+    });
+  }
+  const authSources = Array.isArray(auth.sources) ? auth.sources as Array<Record<string, unknown>> : [];
+  for (const sourceAuth of authSources) {
+    const sourceId = String(sourceAuth.sourceId ?? sourceAuth.id ?? "unknown");
+    if (sourceAuth.ok !== true) {
+      findings.push({
+        severity: "error",
+        path: `sources.${sourceId}.authRef`,
+        message: typeof sourceAuth.error === "string" ? redactSecretString(sourceAuth.error) : "Gmail source credentials are not ready.",
+      });
+    }
+    if (sourceAuth.configuredModifyScope === true && sourceAuth.credentialModifyScope === false) {
+      findings.push({
+        severity: "warning",
+        path: `sources.${sourceId}.gmailActions.hasModifyScope`,
+        message: "Gmail write actions are configured, but resolved OAuth scopes do not allow Gmail modify.",
+      });
+    }
+  }
+  const statusSources = Array.isArray(status.sources) ? status.sources as Array<Record<string, unknown>> : [];
+  for (const sourceStatus of statusSources) {
+    const sourceId = String(sourceStatus.id ?? "unknown");
+    const readiness = objectValue(sourceStatus.readiness);
+    if (readiness?.mode === "watch" && readiness.watchTopicConfigured !== true) {
+      findings.push({
+        severity: "error",
+        path: `sources.${sourceId}.watchTopicName`,
+        message: "Watch source has no Pub/Sub topic configured.",
+      });
+    }
+    if (readiness?.mode === "watch" && readiness.historyCursorPresent !== true) {
+      findings.push({
+        severity: "warning",
+        path: `sources.${sourceId}.watch`,
+        message: "Watch source has no stored Gmail history cursor yet; run setupWatch or let the first notification establish the cursor.",
+      });
+    }
+    if (readiness?.watchNeedsRenewal === true) {
+      findings.push({
+        severity: "warning",
+        path: `sources.${sourceId}.watch`,
+        message: "Gmail watch is expired or inside the renewal window; run renewWatch.",
+      });
+    }
+    if (readiness?.missedNotificationRepairDue === true) {
+      findings.push({
+        severity: "warning",
+        path: `sources.${sourceId}.watch`,
+        message: "No recent Gmail notification/history activity; run repairWatch to drain history and refresh diagnostics.",
+      });
+    }
+    const lastPoll = objectValue(sourceStatus.lastPoll);
+    if (lastPoll?.status === "failed" || lastPoll?.status === "completed_with_errors") {
+      const error = objectValue(lastPoll.error);
+      findings.push({
+        severity: lastPoll.status === "failed" ? "error" : "warning",
+        path: `sources.${sourceId}.lastPoll`,
+        message: `Last poll ${String(lastPoll.status)} at stage ${String(lastPoll.stage ?? "unknown")}${typeof error?.message === "string" ? `: ${redactSecretString(error.message)}` : ""}`,
+      });
+    }
+  }
+  return dedupeFindings(findings);
+}
+
+function redactSupportStatus(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSupportStatus(entry));
+  }
+  const raw = objectValue(value);
+  if (!raw) {
+    return typeof value === "string" ? redactSecretString(value) : value;
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    if (/token|secret|api[_-]?key|authorization/i.test(key)) {
+      result[key] = "[redacted]";
+    } else {
+      result[key] = redactSupportStatus(entry);
+    }
+  }
+  return result;
+}
+
+function redactSecretString(value: string): string {
+  return value
+    .replace(/(["'])(access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|api[_-]?key|authorization)\1\s*:\s*(["'])[^"']*\3/gi, "$1$2$1: $3[redacted]$3")
+    .replace(/(access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|api[_-]?key|authorization)\s*(=|:)\s*[^,\s)}]+/gi, "$1$2 [redacted]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]");
+}
+
+function dedupeFindings(findings: RuntimeReadinessFinding[]): RuntimeReadinessFinding[] {
+  const seen = new Set<string>();
+  return findings.filter((finding) => {
+    const key = `${finding.severity}:${finding.path}:${finding.message}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }

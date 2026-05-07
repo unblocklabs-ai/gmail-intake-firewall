@@ -1273,6 +1273,21 @@ function buildSourceReadiness(source: GmailSourceConfig, cursor: Record<string, 
     ? cursor.credentialScopes.filter((scope): scope is string => typeof scope === "string")
     : undefined;
   const credentialModifyScope = gmailScopesAllowModify(credentialScopes);
+  const suggestedOperations: string[] = [];
+  if (mode === "watch") {
+    if (!source.watchTopicName) {
+      suggestedOperations.push("configure_watch_topic");
+    }
+    if (!historyId) {
+      suggestedOperations.push("setupWatch");
+    }
+    if (watchNeedsRenewal) {
+      suggestedOperations.push("renewWatch");
+    }
+    if (missedNotificationRepairDue) {
+      suggestedOperations.push("repairWatch");
+    }
+  }
   return {
     mode,
     authConfigured: Boolean(source.authRef ?? source.credentialRef),
@@ -1295,6 +1310,7 @@ function buildSourceReadiness(source: GmailSourceConfig, cursor: Record<string, 
       ...(lastHistoryAt ? { lastHistoryAt } : {}),
       ...(lastWatchRenewalAt ? { lastWatchRenewalAt } : {}),
       ...(lastRepairAt ? { lastRepairAt } : {}),
+      suggestedOperations,
     } : {}),
   };
 }
