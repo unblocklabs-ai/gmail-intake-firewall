@@ -280,6 +280,53 @@ test("plugin source auth check fails for unimplemented DWD", async () => {
   assert.match(String(first?.error), /not implemented/);
 });
 
+test("plugin source auth check uses env SecretRef without injected host resolver", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gmail-intake-plugin-"));
+  const key = "GMAIL_INTAKE_FIREWALL_PLUGIN_TEST_AUTH_JSON";
+  const previous = process.env[key];
+  process.env[key] = JSON.stringify({
+    refreshToken: "refresh-token",
+    clientId: "client-id",
+    clientSecret: "client-secret",
+    scopes: ["https://www.googleapis.com/auth/gmail.modify"],
+  });
+  let service: CapturedService | undefined;
+  try {
+    registerGmailIntakeFirewallPlugin({
+      pluginConfig: {
+        dryRun: true,
+        sqlitePath: join(dir, "state.sqlite"),
+        sources: [{
+          id: "primary",
+          accountEmail: "user@example.com",
+          authRef: { source: "env", id: key },
+        }],
+      },
+      registerService(candidate: unknown) {
+        service = candidate as typeof service;
+      },
+    });
+
+    assert.ok(service);
+    const result = await service.checkSourceAuth({ sourceId: "primary" });
+    const first = (result.sources as Array<Record<string, unknown>>)[0];
+
+    assert.equal(result.ok, true);
+    assert.equal(first?.ok, true);
+    assert.equal(first?.hasRefreshToken, true);
+    assert.equal(first?.hasClientId, true);
+    assert.equal(first?.hasClientSecret, true);
+    assert.equal(first?.canModifyGmail, true);
+    assert.equal("refreshToken" in first!, false);
+  } finally {
+    if (previous === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = previous;
+    }
+  }
+});
+
 test("plugin service rejects unbounded backfill unless explicitly allowed", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gmail-intake-plugin-"));
   let service: CapturedService | undefined;

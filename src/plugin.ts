@@ -468,9 +468,7 @@ function buildGmailIntakeFirewallService(
       runtimeReadiness = await validateRuntimeReadiness(config, secretResolver, openaiApiKey);
       const runtimeDeps = {
         stateStore,
-        gmailClientFactory: secretResolver
-          ? async (source: GmailSourceConfig) => createGoogleapisGmailClient(source, await resolveGoogleAuthMaterial(source, secretResolver))
-          : createUnavailableGmailClientFactory(),
+        gmailClientFactory: async (source: GmailSourceConfig) => createGoogleapisGmailClient(source, await resolveGoogleAuthMaterial(source, secretResolver)),
         securityClassifier: openaiApiKey
           ? createOpenAiSecurityClassifier({ apiKey: openaiApiKey, model: config.openai_model })
           : createUnavailableSecurityClassifier(),
@@ -685,14 +683,6 @@ function buildGmailIntakeFirewallService(
         };
       }
       const secretResolver = resolveSecretResolver(host);
-      if (!secretResolver) {
-        return {
-          ok: false,
-          service: "gmail-intake-firewall-service",
-          error: "Host secret resolver is unavailable.",
-          sources: sources.map((source) => safeSourceAuthStatus(source)),
-        };
-      }
       const checks = [];
       for (const source of sources) {
         checks.push(await checkSourceAuthMaterial(source, secretResolver));
@@ -856,9 +846,6 @@ async function checkSourceAuthMaterial(
   source: GmailSourceConfig,
   secretResolver: ReturnType<typeof resolveSecretResolver>,
 ): Promise<Record<string, unknown>> {
-  if (!secretResolver) {
-    return safeSourceAuthStatus(source, "secret_resolver_unavailable");
-  }
   try {
     const material = await resolveGoogleAuthMaterial(source, secretResolver);
     const hasAccessToken = Boolean(material.accessToken);
@@ -1031,12 +1018,14 @@ async function validateRuntimeReadiness(
     });
   }
   if (!secretResolver) {
-    findings.push({
-      severity: "error",
-      path: "secrets",
-      message: "Host secret resolver is unavailable; Gmail source credentials cannot be resolved.",
-    });
-    return findings;
+    const hasOnlyHostRefs = config.sources.some((source) => source.enabled && sourceHasHostOnlyAuthRef(source));
+    if (hasOnlyHostRefs) {
+      findings.push({
+        severity: "error",
+        path: "secrets",
+        message: "Host secret resolver is unavailable; Gmail source credentials must use inline, env, or file auth references in this runtime.",
+      });
+    }
   }
   for (const source of config.sources.filter((candidate) => candidate.enabled)) {
     try {
@@ -1064,4 +1053,18 @@ async function validateRuntimeReadiness(
     }
   }
   return findings;
+}
+
+function sourceHasHostOnlyAuthRef(source: GmailSourceConfig): boolean {
+  const ref = source.authRef ?? source.credentialRef;
+  if (!ref || typeof ref !== "object") {
+    return false;
+  }
+  const raw = ref as Record<string, unknown>;
+  if (typeof raw.accessToken === "string" || typeof raw.refreshToken === "string") {
+    return false;
+  }
+  const sourceKind = typeof raw.source === "string" ? raw.source : undefined;
+  const provider = typeof raw.provider === "string" ? raw.provider : undefined;
+  return sourceKind !== "env" && sourceKind !== "file" && provider !== "env" && provider !== "file" && !raw.path;
 }

@@ -46,6 +46,28 @@ test("OpenAI API key resolves from SecretRef before config fallback", async () =
   assert.equal(apiKey, "from-secret");
 });
 
+test("OpenAI API key resolves from env SecretRef without a host resolver", async () => {
+  const key = "GMAIL_INTAKE_FIREWALL_TEST_OPENAI_KEY";
+  const previous = process.env[key];
+  process.env[key] = "from-env";
+  try {
+    const config = resolvePluginConfig({
+      openaiApiKeyRef: { source: "env", id: key },
+      OPENAI_API_KEY: "fallback",
+    });
+
+    const apiKey = await resolveOpenAiApiKey(config, undefined);
+
+    assert.equal(apiKey, "from-env");
+  } finally {
+    if (previous === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = previous;
+    }
+  }
+});
+
 test("config defaults OpenAI model to gpt-5.5 and accepts override", () => {
   assert.equal(resolvePluginConfig({}).openai_model, "gpt-5.5");
   assert.equal(resolvePluginConfig({ openai_model: "gpt-5.5-mini" }).openai_model, "gpt-5.5-mini");

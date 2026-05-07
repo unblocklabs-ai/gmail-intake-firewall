@@ -43,7 +43,7 @@ V1 is intentionally boring and reliable:
 - Per-user OAuth refresh tokens first, with auth hidden behind an interface for later Workspace domain-wide delegation.
 - `gmail.modify` capable, but Gmail write actions are config-gated and dry-run safe.
 - Read-only Gmail sources degrade to classify, alert, and log without label/archive.
-- Security classifier uses OpenAI via an OpenClaw SecretRef for `OPENAI_API_KEY`, with a config-level `OPENAI_API_KEY` fallback for local installs. `openai_model` defaults to `gpt-5.5`.
+- Security classifier uses OpenAI via a SecretRef for `OPENAI_API_KEY`, with a config-level `OPENAI_API_KEY` fallback for local installs. `openai_model` defaults to `gpt-5.5`.
 - Security classification receives body text, stripped/sanitized HTML-derived text, normalized links, headers, and attachment metadata. It does not receive active/raw HTML as executable-looking context, and links are not fetched.
 - `uncertain` fails closed by default and quarantines.
 - Router classification sees safe normalized/clipped body, metadata, and the security sanitized summary.
@@ -83,6 +83,19 @@ Recommended dry-run rollout:
 6. Use `inspectMessage({ sourceId, messageId })` to review events, decisions, and action attempts.
 7. Use `gmail_intake_firewall_review` for text-based quarantine review when an agent needs to list quarantined items, present safe metadata to a human, record feedback, wake a target, or add sender preferences.
 8. Enable selected Gmail/Slack/wake actions only after dry-run decisions look correct.
+
+Current gateway-compatible secret refs are inline credential objects, env refs, and file refs. For Gmail OAuth, the recommended v1 shape is an env or file ref whose value is JSON:
+
+```json
+{
+  "refreshToken": "google-oauth-refresh-token",
+  "clientId": "google-oauth-client-id",
+  "clientSecret": "google-oauth-client-secret",
+  "scopes": ["https://www.googleapis.com/auth/gmail.modify"]
+}
+```
+
+For example, set `GMAIL_PRIMARY_OAUTH_JSON` to that JSON and configure `"authRef": { "source": "env", "id": "GMAIL_PRIMARY_OAUTH_JSON" }`. A file ref may use `"authRef": { "source": "file", "id": "/secure/path/gmail-primary.json" }`. The plugin still supports host-injected secret resolvers when OpenClaw provides one, but it no longer requires that undocumented runtime surface for gateway Pub/Sub processing.
 
 Service methods:
 
@@ -140,7 +153,7 @@ Plugin config shape:
       "intakeMode": "watch",
       "watchTopicName": "projects/my-project/topics/gmail-intake",
       "historyLookback": "2d",
-      "authRef": { "source": "openclaw", "provider": "secrets", "id": "gmail-primary" }
+      "authRef": { "source": "env", "id": "GMAIL_PRIMARY_OAUTH_JSON" }
     }
   ]
 }
@@ -188,14 +201,14 @@ Example policy skeleton:
 {
   "dryRun": true,
   "webhookSecret": "replace-with-long-random-secret",
-  "openaiApiKeyRef": { "source": "openclaw", "provider": "secrets", "id": "OPENAI_API_KEY" },
+  "openaiApiKeyRef": { "source": "env", "id": "OPENAI_API_KEY" },
   "openai_model": "gpt-5.5",
   "sqlitePath": "~/.openclaw/gmail-intake-firewall/state.sqlite",
   "sources": [
     {
       "id": "primary",
       "accountEmail": "user@example.com",
-      "authRef": { "source": "openclaw", "provider": "secrets", "id": "gmail-primary" },
+      "authRef": { "source": "env", "id": "GMAIL_PRIMARY_OAUTH_JSON" },
       "enabled": true,
       "candidateQuery": "in:inbox newer_than:7d",
       "intakeMode": "poll",

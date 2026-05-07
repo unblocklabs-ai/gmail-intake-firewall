@@ -1,4 +1,4 @@
-import type { SecretResolver } from "./googleAuth.js";
+import { resolveSecretValue, type SecretResolver } from "./googleAuth.js";
 import type {
   NormalizedMessageForClassification,
   PluginConfig,
@@ -13,19 +13,24 @@ export async function resolveOpenAiApiKey(
   config: PluginConfig,
   resolver: SecretResolver | undefined,
 ): Promise<string | undefined> {
-  if (config.openaiApiKeyRef && resolver) {
-    const value = await resolver.resolveSecret(config.openaiApiKeyRef);
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
-    if (value && typeof value === "object") {
-      const raw = value as Record<string, unknown>;
-      if (typeof raw.OPENAI_API_KEY === "string" && raw.OPENAI_API_KEY.trim()) {
-        return raw.OPENAI_API_KEY.trim();
+  if (config.openaiApiKeyRef) {
+    try {
+      const value = await resolveSecretValue(config.openaiApiKeyRef, resolver);
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
       }
-      if (typeof raw.apiKey === "string" && raw.apiKey.trim()) {
-        return raw.apiKey.trim();
+      if (value && typeof value === "object") {
+        const raw = value as Record<string, unknown>;
+        if (typeof raw.OPENAI_API_KEY === "string" && raw.OPENAI_API_KEY.trim()) {
+          return raw.OPENAI_API_KEY.trim();
+        }
+        if (typeof raw.apiKey === "string" && raw.apiKey.trim()) {
+          return raw.apiKey.trim();
+        }
       }
+    } catch {
+      // Fall through to the explicit config fallback below. Runtime readiness
+      // still reports an unavailable classifier when no fallback is present.
     }
   }
   return config.OPENAI_API_KEY;

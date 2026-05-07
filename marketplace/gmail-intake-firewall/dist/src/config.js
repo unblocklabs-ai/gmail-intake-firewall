@@ -266,12 +266,26 @@ export function validatePluginConfig(config) {
     addDuplicateFindings(findings, "alertSinks", config.alertSinks.map((sink) => sink.id));
     const wakeTargetIds = new Set(config.wakeTargets.map((target) => target.id));
     const alertSinkIds = new Set(config.alertSinks.map((sink) => sink.id));
+    if (isHostOnlySecretRef(config.openaiApiKeyRef)) {
+        findings.push({
+            severity: "warning",
+            path: "openaiApiKeyRef",
+            message: "openaiApiKeyRef uses a host-only secret shape. Current gateway deployments should use an env/file SecretRef or config-level OPENAI_API_KEY unless the host injects a plugin secret resolver.",
+        });
+    }
     for (const source of config.sources) {
         if (!source.authRef && !source.credentialRef) {
             findings.push({
                 severity: "warning",
                 path: `sources.${source.id}.authRef`,
                 message: "Source has no authRef/credentialRef; Gmail access will be unavailable unless the host injects a Gmail client.",
+            });
+        }
+        if (isHostOnlySecretRef(source.authRef ?? source.credentialRef)) {
+            findings.push({
+                severity: "warning",
+                path: `sources.${source.id}.authRef`,
+                message: "Gmail authRef uses a host-only secret shape. Current gateway deployments should use an inline OAuth object or env/file SecretRef unless the host injects a plugin secret resolver.",
             });
         }
         if (source.intakeMode === "watch" && !source.watchTopicName) {
@@ -391,4 +405,21 @@ function isValidTimezone(timezone) {
     catch {
         return false;
     }
+}
+function isHostOnlySecretRef(ref) {
+    const raw = asRecord(ref);
+    if (Object.keys(raw).length === 0) {
+        return false;
+    }
+    if (stringValue(raw.accessToken)
+        || stringValue(raw.refreshToken)
+        || stringValue(raw.clientId)
+        || stringValue(raw.clientSecret)
+        || stringValue(raw.OPENAI_API_KEY)
+        || stringValue(raw.apiKey)) {
+        return false;
+    }
+    const source = stringValue(raw.source);
+    const provider = stringValue(raw.provider);
+    return source !== "env" && source !== "file" && provider !== "env" && provider !== "file" && !stringValue(raw.path);
 }

@@ -32,7 +32,7 @@ test("config validation accepts a complete operator policy", () => {
     sources: [{
       id: "primary",
       accountEmail: "user@example.com",
-      authRef: { source: "openclaw", provider: "secrets", id: "gmail-primary" },
+      authRef: { source: "env", id: "GMAIL_PRIMARY_OAUTH_JSON" },
     }],
     security: { alertTarget: "security" },
     alertSinks: [{ id: "security", kind: "slack", target: "slack:#security", enabled: true }],
@@ -48,6 +48,22 @@ test("config validation accepts a complete operator policy", () => {
   });
 
   assert.deepEqual(validatePluginConfig(config), []);
+});
+
+test("config validation warns for host-only secret refs on gateway paths", () => {
+  const config = resolvePluginConfig({
+    openaiApiKeyRef: { source: "openclaw", provider: "secrets", id: "OPENAI_API_KEY" },
+    sources: [{
+      id: "primary",
+      accountEmail: "user@example.com",
+      authRef: { source: "openclaw", provider: "secrets", id: "gmail-primary" },
+    }],
+  });
+
+  const findings = validatePluginConfig(config);
+
+  assert.equal(findings.some((finding) => finding.path === "openaiApiKeyRef" && finding.severity === "warning"), true);
+  assert.equal(findings.some((finding) => finding.path === "sources.primary.authRef" && finding.severity === "warning"), true);
 });
 
 test("security alert snippets are opt-in and disabled by default", () => {

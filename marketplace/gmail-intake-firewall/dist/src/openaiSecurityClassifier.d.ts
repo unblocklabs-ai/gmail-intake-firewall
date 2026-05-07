@@ -1,4 +1,4 @@
-import type { SecretResolver } from "./googleAuth.js";
+import { type SecretResolver } from "./googleAuth.js";
 import type { PluginConfig } from "./types.js";
 import type { SecurityClassifier } from "./securityClassifier.js";
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;

@@ -42,7 +42,7 @@
     },
     "openaiApiKeyRef": {
       "label": "OpenAI API Key Secret",
-      "help": "OpenClaw SecretRef for OPENAI_API_KEY."
+      "help": "SecretRef for OPENAI_API_KEY. Env and file refs work in the gateway path; host-injected resolvers are used when available."
     },
     "OPENAI_API_KEY": {
       "label": "OpenAI API Key",
@@ -102,7 +102,7 @@
       },
       "openaiApiKeyRef": {
         "type": "object",
-        "description": "OpenClaw SecretRef resolving to OPENAI_API_KEY or an object containing OPENAI_API_KEY/apiKey."
+        "description": "SecretRef resolving to OPENAI_API_KEY or an object containing OPENAI_API_KEY/apiKey. Env and file refs are supported without a host resolver."
       },
       "OPENAI_API_KEY": {
         "type": "string",
@@ -130,10 +130,12 @@
               "type": "string"
             },
             "authRef": {
-              "type": "object"
+              "type": "object",
+              "description": "Gmail OAuth material, or a SecretRef resolving to JSON with refreshToken/clientId/clientSecret/scopes. Env and file refs are supported without a host resolver."
             },
             "credentialRef": {
-              "type": "object"
+              "type": "object",
+              "description": "Alias for authRef."
             },
             "enabled": {
               "type": "boolean",
