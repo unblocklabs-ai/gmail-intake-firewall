@@ -294,6 +294,18 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Deprecated compatibility field. Ignored; use actions.*.mode for execution policy."
+                },
+                "applyLabels": {
+                  "type": "boolean",
+                  "description": "Deprecated compatibility field. Ignored; use actions.gmail.label.mode for execution policy."
+                },
+                "archive": {
+                  "type": "boolean",
+                  "description": "Deprecated compatibility field. Ignored; use actions.gmail.archive.mode for execution policy."
+                },
                 "hasModifyScope": {
                   "type": "boolean",
                   "default": true,

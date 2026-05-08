@@ -124,6 +124,7 @@ Review tool:
 - `replayWithFeedback` records the human decision and replays the latest stored intake event with `force: true` by default, so a reviewed-safe message can run through security/router policy again and produce the normal label/aggregate/wake behavior.
 - `wakeNow` creates a sanitized detached wake from the reviewed decision. It requires an explicit `wakeTarget` for reviewed quarantines and does not include raw suspicious body or attachments.
 - Artifact analysis is local and non-fetching by default. Link metadata includes structural risk hints without requesting URLs, and attachment metadata includes filename/MIME/extension risk hints without downloading or opening attachment bytes. Keep `artifacts.fetchLinks` and `artifacts.downloadAttachments` false in this version.
+- Deprecated `gmailActions.enabled`, `gmailActions.applyLabels`, and `gmailActions.archive` keys may remain in existing config files during update, but they are ignored. Use `actions.*.mode` for rollout policy and `gmailActions.hasModifyScope` only for source Gmail modify capability.
 
 ## Gmail Watch / PubSub Production Setup
 
