@@ -1,7 +1,7 @@
 {
   "id": "gmail-intake-firewall",
   "name": "Gmail Intake Firewall",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Classifies Gmail intake before agent exposure, quarantines risky mail, and routes safe mail by explicit policy.",
   "enabledByDefault": false,
   "kind": [
@@ -122,10 +122,30 @@
             "additionalProperties": false,
             "default": {},
             "properties": {
-              "label": { "$ref": "#/$defs/actionMode", "default": { "mode": "dry_run" } },
-              "archive": { "$ref": "#/$defs/actionMode", "default": { "mode": "disabled" } },
-              "removeLabel": { "$ref": "#/$defs/actionMode", "default": { "mode": "dry_run" } },
-              "restoreInbox": { "$ref": "#/$defs/actionMode", "default": { "mode": "disabled" } }
+              "label": {
+                "$ref": "#/$defs/actionMode",
+                "default": {
+                  "mode": "dry_run"
+                }
+              },
+              "archive": {
+                "$ref": "#/$defs/actionMode",
+                "default": {
+                  "mode": "disabled"
+                }
+              },
+              "removeLabel": {
+                "$ref": "#/$defs/actionMode",
+                "default": {
+                  "mode": "dry_run"
+                }
+              },
+              "restoreInbox": {
+                "$ref": "#/$defs/actionMode",
+                "default": {
+                  "mode": "disabled"
+                }
+              }
             }
           },
           "slack": {
@@ -133,7 +153,12 @@
             "additionalProperties": false,
             "default": {},
             "properties": {
-              "alert": { "$ref": "#/$defs/actionMode", "default": { "mode": "dry_run" } }
+              "alert": {
+                "$ref": "#/$defs/actionMode",
+                "default": {
+                  "mode": "dry_run"
+                }
+              }
             }
           },
           "wake": {
@@ -141,8 +166,18 @@
             "additionalProperties": false,
             "default": {},
             "properties": {
-              "agent": { "$ref": "#/$defs/actionMode", "default": { "mode": "dry_run" } },
-              "aggregate": { "$ref": "#/$defs/actionMode", "default": { "mode": "dry_run" } }
+              "agent": {
+                "$ref": "#/$defs/actionMode",
+                "default": {
+                  "mode": "dry_run"
+                }
+              },
+              "aggregate": {
+                "$ref": "#/$defs/actionMode",
+                "default": {
+                  "mode": "dry_run"
+                }
+              }
             }
           },
           "local": {
@@ -150,7 +185,12 @@
             "additionalProperties": false,
             "default": {},
             "properties": {
-              "log": { "$ref": "#/$defs/actionMode", "default": { "mode": "live" } }
+              "log": {
+                "$ref": "#/$defs/actionMode",
+                "default": {
+                  "mode": "live"
+                }
+              }
             }
           }
         }
