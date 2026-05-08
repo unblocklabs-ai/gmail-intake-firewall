@@ -32,6 +32,26 @@
       "label": "Dry Run",
       "help": "Record intended Gmail, Slack, and wake actions without executing them."
     },
+    "actions.gmail.label.mode": {
+      "label": "Gmail Label Mode",
+      "help": "Controls live execution for applying Gmail labels. dryRun overrides this globally."
+    },
+    "actions.gmail.archive.mode": {
+      "label": "Gmail Archive Mode",
+      "help": "Controls live execution for removing messages from inbox. dryRun overrides this globally."
+    },
+    "actions.slack.alert.mode": {
+      "label": "Slack Alert Mode",
+      "help": "Controls live execution for Slack security alerts. dryRun overrides this globally."
+    },
+    "actions.wake.agent.mode": {
+      "label": "Agent Wake Mode",
+      "help": "Controls live execution for immediate agent wakes. dryRun overrides this globally."
+    },
+    "actions.wake.aggregate.mode": {
+      "label": "Aggregate Wake Mode",
+      "help": "Controls live execution for digest wakes. dryRun overrides this globally."
+    },
     "statePath": {
       "label": "State Path",
       "help": "Deprecated JSON fallback path. Use SQLite Path."
@@ -91,6 +111,49 @@
       "dryRun": {
         "type": "boolean",
         "default": true
+      },
+      "actions": {
+        "type": "object",
+        "additionalProperties": false,
+        "default": {},
+        "properties": {
+          "gmail": {
+            "type": "object",
+            "additionalProperties": false,
+            "default": {},
+            "properties": {
+              "label": { "$ref": "#/$defs/actionMode", "default": { "mode": "dry_run" } },
+              "archive": { "$ref": "#/$defs/actionMode", "default": { "mode": "disabled" } },
+              "removeLabel": { "$ref": "#/$defs/actionMode", "default": { "mode": "dry_run" } },
+              "restoreInbox": { "$ref": "#/$defs/actionMode", "default": { "mode": "disabled" } }
+            }
+          },
+          "slack": {
+            "type": "object",
+            "additionalProperties": false,
+            "default": {},
+            "properties": {
+              "alert": { "$ref": "#/$defs/actionMode", "default": { "mode": "dry_run" } }
+            }
+          },
+          "wake": {
+            "type": "object",
+            "additionalProperties": false,
+            "default": {},
+            "properties": {
+              "agent": { "$ref": "#/$defs/actionMode", "default": { "mode": "dry_run" } },
+              "aggregate": { "$ref": "#/$defs/actionMode", "default": { "mode": "dry_run" } }
+            }
+          },
+          "local": {
+            "type": "object",
+            "additionalProperties": false,
+            "default": {},
+            "properties": {
+              "log": { "$ref": "#/$defs/actionMode", "default": { "mode": "live" } }
+            }
+          }
+        }
       },
       "statePath": {
         "type": "string",
@@ -191,22 +254,10 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": {
-                  "type": "boolean",
-                  "default": true
-                },
-                "applyLabels": {
-                  "type": "boolean",
-                  "default": true
-                },
-                "archive": {
-                  "type": "boolean",
-                  "default": true
-                },
                 "hasModifyScope": {
                   "type": "boolean",
                   "default": true,
-                  "description": "Set false when auth only has Gmail read scope; plugin will classify, alert, and log without label/archive."
+                  "description": "Set false when auth only has Gmail read scope; actions.*.mode remains the execution policy, but Gmail mutations will be skipped for this source."
                 }
               },
               "default": {}
@@ -464,6 +515,25 @@
           }
         },
         "default": {}
+      }
+    },
+    "$defs": {
+      "actionMode": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "live",
+              "dry_run",
+              "disabled"
+            ]
+          }
+        },
+        "required": [
+          "mode"
+        ]
       }
     }
   }

@@ -1,9 +1,9 @@
 export function buildQuarantineActions(message, classification, config, source, artifactAnalysis) {
     const actions = [];
-    if (canApplyGmailModifications(source) && source.gmailActions.applyLabels) {
+    if (canApplyGmailModifications(source)) {
         actions.push({ type: "gmail_label", label: config.security.quarantineLabel, messageId: message.messageId });
     }
-    if (canApplyGmailModifications(source) && source.gmailActions.archive && config.security.archiveOnQuarantine) {
+    if (canApplyGmailModifications(source) && config.security.archiveOnQuarantine) {
         actions.push({ type: "gmail_archive", messageId: message.messageId });
     }
     for (const sink of config.alertSinks.filter((candidate) => candidate.enabled)) {
@@ -30,19 +30,20 @@ export function buildQuarantineActions(message, classification, config, source, 
     }
     return actions;
 }
-export async function executePlannedActions(actions, dryRun, deps) {
-    if (dryRun) {
-        return actions.map((action, actionIndex) => ({
-            actionIndex,
-            action,
-            required: isRequiredExecutableAction(action),
-            status: "skipped_dry_run",
-        }));
-    }
+export async function executePlannedActions(actions, options, deps) {
     const results = [];
     for (const action of actions) {
         const actionIndex = results.length;
         const required = isRequiredExecutableAction(action);
+        const gate = resolveActionGate(action, options);
+        if (gate.status) {
+            const gated = { actionIndex, action, required, status: gate.status };
+            if (gate.reason) {
+                gated.reason = gate.reason;
+            }
+            results.push(gated);
+            continue;
+        }
         try {
             if (action.type === "gmail_label") {
                 if (!deps.gmail) {
@@ -75,7 +76,10 @@ export async function executePlannedActions(actions, dryRun, deps) {
                 await deps.slack.postAlert(action.target, action.summary, action.payload);
             }
             else if (action.type === "local_log") {
-                await deps.localLog?.write(action.summary, action.payload);
+                if (!deps.localLog) {
+                    throw new Error("Local log executor is not configured");
+                }
+                await deps.localLog.write(action.summary, action.payload);
             }
             else if (action.type === "agent_wake") {
                 if (!deps.wake) {
@@ -118,7 +122,7 @@ export function buildSafeRoutingActions(message, routing, security, tags, wakeTa
     const actions = [];
     const policy = resolveRoutingPolicy(routing, tags, wakeTargets);
     for (const tag of policy.tags) {
-        if (tag?.gmailLabel && canApplyGmailModifications(source) && source.gmailActions.applyLabels) {
+        if (tag?.gmailLabel && canApplyGmailModifications(source)) {
             actions.push({ type: "gmail_label", label: tag.gmailLabel, messageId: message.messageId });
         }
     }
@@ -151,7 +155,70 @@ export function buildSafeRoutingActions(message, routing, security, tags, wakeTa
     return actions;
 }
 function canApplyGmailModifications(source) {
-    return source.gmailActions.enabled && source.gmailActions.hasModifyScope;
+    return source.gmailActions.hasModifyScope;
+}
+export function resolveActionMode(action, actions) {
+    if (action.type === "gmail_label") {
+        return { path: "actions.gmail.label.mode", mode: actions.gmail.label.mode };
+    }
+    if (action.type === "gmail_remove_label") {
+        return { path: "actions.gmail.removeLabel.mode", mode: actions.gmail.removeLabel.mode };
+    }
+    if (action.type === "gmail_archive") {
+        return { path: "actions.gmail.archive.mode", mode: actions.gmail.archive.mode };
+    }
+    if (action.type === "gmail_restore_inbox") {
+        return { path: "actions.gmail.restoreInbox.mode", mode: actions.gmail.restoreInbox.mode };
+    }
+    if (action.type === "human_alert" && action.sink === "slack") {
+        return { path: "actions.slack.alert.mode", mode: actions.slack.alert.mode };
+    }
+    if (action.type === "local_log") {
+        return { path: "actions.local.log.mode", mode: actions.local.log.mode };
+    }
+    if (action.type === "agent_wake") {
+        return { path: "actions.wake.agent.mode", mode: actions.wake.agent.mode };
+    }
+    return { path: "actions.local.log.mode", mode: "live" };
+}
+export function resolveConfiguredMode(modeConfig, path, dryRun) {
+    if (dryRun) {
+        return { mode: "dry_run", reason: "dryRun is enabled" };
+    }
+    if (modeConfig.mode === "dry_run") {
+        return { mode: "dry_run", reason: `${path} is dry_run` };
+    }
+    if (modeConfig.mode === "disabled") {
+        return { mode: "disabled", reason: `${path} is disabled` };
+    }
+    return { mode: "live" };
+}
+function resolveActionGate(action, options) {
+    if (action.type === "record_only" || action.type === "aggregate_enqueue") {
+        return {};
+    }
+    const { path, mode } = resolveActionMode(action, options.actions);
+    const resolved = resolveConfiguredMode({ mode }, path, options.dryRun);
+    if (resolved.mode === "dry_run") {
+        return resolved.reason
+            ? { status: "skipped_dry_run", reason: resolved.reason }
+            : { status: "skipped_dry_run" };
+    }
+    if (resolved.mode === "disabled") {
+        return resolved.reason
+            ? { status: "disabled", reason: resolved.reason }
+            : { status: "disabled" };
+    }
+    if (isGmailAction(action) && options.source && !options.source.gmailActions.hasModifyScope) {
+        return { status: "disabled", reason: `sources.${options.source.id}.gmailActions.hasModifyScope is false` };
+    }
+    return {};
+}
+function isGmailAction(action) {
+    return action.type === "gmail_label"
+        || action.type === "gmail_remove_label"
+        || action.type === "gmail_archive"
+        || action.type === "gmail_restore_inbox";
 }
 function buildWakePayload(message, routing, security, artifactAnalysis) {
     const payload = {

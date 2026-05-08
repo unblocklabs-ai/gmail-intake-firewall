@@ -1,5 +1,11 @@
 import { buildDigestWake } from "./aggregate.js";
-import { executePlannedActions, requiredActionsSucceeded, type ActionExecutionStatus, type ActionExecutorDeps } from "./actions.js";
+import {
+  executePlannedActions,
+  requiredActionsSucceeded,
+  resolveConfiguredMode,
+  type ActionExecutionStatus,
+  type ActionExecutorDeps,
+} from "./actions.js";
 import { buildCandidateQuery, candidateToIntakeEvent, type GmailCandidate, type GmailClient, type GmailHistoryPage, type GmailPushNotification } from "./gmail.js";
 import { gmailScopesAllowModify } from "./googleAuth.js";
 import { processMessage, type ProcessMessageDeps } from "./engine.js";
@@ -220,16 +226,30 @@ export class GmailIntakePollingRuntime {
         if (group.wakeTarget && !wakeTarget) {
           throw new Error(`Aggregate wake target is not configured: ${group.wakeTarget}`);
         }
+        const aggregateMode = resolveConfiguredMode(
+          this.config.actions.wake.aggregate,
+          "actions.wake.aggregate.mode",
+          this.config.dryRun,
+        );
         const wakeExecutor = this.deps.actionDeps?.wake;
-        if (!wakeExecutor && !this.config.dryRun) {
+        if (!wakeExecutor && aggregateMode.mode === "live") {
           throw new Error("Detached wake executor is not configured");
         }
-        if (this.config.dryRun) {
+        if (aggregateMode.mode === "dry_run") {
           this.deps.logger?.info?.("gmail-intake-firewall dry-run aggregate wake", {
             group: group.key,
             itemCount: group.items.length,
             wake,
+            reason: aggregateMode.reason,
           });
+        } else if (aggregateMode.mode === "disabled") {
+          this.deps.logger?.info?.("gmail-intake-firewall aggregate wake disabled", {
+            group: group.key,
+            itemCount: group.items.length,
+            reason: aggregateMode.reason,
+          });
+          summary.skipped += group.items.length;
+          continue;
         } else {
           await wakeExecutor!.startDetachedAgentTurn(wake);
           this.deps.stateStore.markAggregateDelivered(group.items, now.toISOString());
@@ -265,9 +285,6 @@ export class GmailIntakePollingRuntime {
         intakeMode: source.intakeMode ?? "poll",
         polling: source.polling,
         gmailActions: {
-          enabled: source.gmailActions.enabled,
-          applyLabels: source.gmailActions.applyLabels,
-          archive: source.gmailActions.archive,
           hasModifyScope: source.gmailActions.hasModifyScope,
         },
         lastPoll: this.pollDiagnostics.get(source.id),
@@ -376,6 +393,7 @@ export class GmailIntakePollingRuntime {
     if (!decision) {
       return { found: false, executed: false };
     }
+    const source = this.config.sources.find((candidate) => candidate.id === input.sourceId);
     const wakeTargetId = input.wakeTarget;
     if (!wakeTargetId) {
       return { found: true, executed: false, error: "wakeTarget is required for reviewed quarantine wake." };
@@ -408,7 +426,11 @@ export class GmailIntakePollingRuntime {
       target: wakeTargetId,
       payload,
     };
-    const actionResults = await executePlannedActions([action], input.dryRun ?? this.config.dryRun, this.deps.actionDeps ?? {});
+    const actionResults = await executePlannedActions([action], {
+      dryRun: input.dryRun ?? this.config.dryRun,
+      actions: this.config.actions,
+      source,
+    }, this.deps.actionDeps ?? {});
     const attemptedAt = this.now().toISOString();
     for (const actionResult of actionResults) {
       this.deps.stateStore.recordActionStatus(decision as DecisionLogEntry, actionResult, attemptedAt);
@@ -453,7 +475,7 @@ export class GmailIntakePollingRuntime {
       return { found: false, executed: false };
     }
     const actions: PlannedAction[] = [];
-    if (source.gmailActions.enabled && source.gmailActions.hasModifyScope) {
+    if (source.gmailActions.hasModifyScope) {
       actions.push({ type: "gmail_remove_label", label: this.config.security.quarantineLabel, messageId: input.messageId });
       if (input.restoreInbox) {
         actions.push({ type: "gmail_restore_inbox", messageId: input.messageId });
@@ -462,7 +484,11 @@ export class GmailIntakePollingRuntime {
     let actionResults: ActionExecutionStatus[] = [];
     if (actions.length > 0) {
       const client = await this.deps.gmailClientFactory(source);
-      actionResults = await executePlannedActions(actions, input.dryRun ?? this.config.dryRun, {
+      actionResults = await executePlannedActions(actions, {
+        dryRun: input.dryRun ?? this.config.dryRun,
+        actions: this.config.actions,
+        source,
+      }, {
         ...(this.deps.actionDeps ?? {}),
         gmail: this.deps.actionDeps?.gmail ?? client,
       });
@@ -494,7 +520,7 @@ export class GmailIntakePollingRuntime {
       executed: actionResults.length === 0 || actionResults.every((result) => result.status !== "failed"),
       actionResults,
       feedback: feedback.feedback,
-      gmailMutationConfigured: source.gmailActions.enabled && source.gmailActions.hasModifyScope,
+      gmailMutationConfigured: source.gmailActions.hasModifyScope,
     };
   }
 
@@ -885,6 +911,7 @@ export class GmailIntakePollingRuntime {
     options: { force?: boolean; dryRun?: boolean } = {},
   ): Promise<ProcessEventResult> {
     const summary: ProcessEventResult = { fetched: 0, processed: 0, skipped: 0, errors: 0 };
+    const source = this.config.sources.find((candidate) => candidate.id === event.sourceId);
     if (!options.force && this.deps.stateStore.isProcessed(event.sourceId, event.messageId)) {
       summary.skipped += 1;
       return summary;
@@ -928,7 +955,11 @@ export class GmailIntakePollingRuntime {
       if (result.decision) {
         this.deps.stateStore.recordDecisionPlan(result.decision);
         stage = "action_execute";
-        const actionResults = await executePlannedActions(result.decision.actions, options.dryRun ?? this.config.dryRun, {
+        const actionResults = await executePlannedActions(result.decision.actions, {
+          dryRun: options.dryRun ?? this.config.dryRun,
+          actions: this.config.actions,
+          source,
+        }, {
           ...(this.deps.actionDeps ?? {}),
           gmail: this.deps.actionDeps?.gmail ?? client,
         });
@@ -1268,7 +1299,7 @@ function buildSourceReadiness(source: GmailSourceConfig, cursor: Record<string, 
   const lastWatchRenewalAt = typeof cursor?.lastWatchRenewalAt === "string" ? cursor.lastWatchRenewalAt : undefined;
   const lastRepairAt = typeof cursor?.lastRepairAt === "string" ? cursor.lastRepairAt : undefined;
   const missedNotificationRepairDue = mode === "watch" && Boolean(historyId) && watchRepairDue(cursor, watchConfig.repairOnNoNotificationMs, now);
-  const configuredModifyScope = source.gmailActions.enabled && source.gmailActions.hasModifyScope;
+  const configuredModifyScope = source.gmailActions.hasModifyScope;
   const credentialScopes = Array.isArray(cursor?.credentialScopes)
     ? cursor.credentialScopes.filter((scope): scope is string => typeof scope === "string")
     : undefined;

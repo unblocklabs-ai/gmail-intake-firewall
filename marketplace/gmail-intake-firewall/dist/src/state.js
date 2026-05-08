@@ -82,7 +82,7 @@ export function openSqliteStateStore(path) {
             db.prepare(`INSERT INTO action_attempts (
           source_id, message_id, processed_at, action_index, action_type, required,
           status, error, attempted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(decision.sourceId, decision.messageId, decision.processedAt, status.actionIndex, status.action.type, status.required ? 1 : 0, status.status, status.error ?? null, attemptedAt);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(decision.sourceId, decision.messageId, decision.processedAt, status.actionIndex, status.action.type, status.required ? 1 : 0, status.status, status.error ?? status.reason ?? null, attemptedAt);
             db.prepare(`INSERT INTO action_statuses (
           source_id, message_id, action_index, action_type, required, status, error, attempted_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -91,7 +91,7 @@ export function openSqliteStateStore(path) {
           required = excluded.required,
           status = excluded.status,
           error = excluded.error,
-          attempted_at = excluded.attempted_at`).run(decision.sourceId, decision.messageId, status.actionIndex, status.action.type, status.required ? 1 : 0, status.status, status.error ?? null, attemptedAt);
+          attempted_at = excluded.attempted_at`).run(decision.sourceId, decision.messageId, status.actionIndex, status.action.type, status.required ? 1 : 0, status.status, status.error ?? status.reason ?? null, attemptedAt);
         },
         listActionStatuses(sourceId, messageId) {
             return db.prepare(`SELECT action_index, action_type, required, status, error, attempted_at

@@ -2,6 +2,7 @@ export type WakeMode = "none" | "wake_now" | "aggregate";
 export type SecurityVerdict = "safe" | "uncertain" | "risky" | "malicious";
 export type AlertSinkKind = "slack" | "local_log";
 export type IntakeMode = "watch" | "history" | "poll";
+export type ActionExecutionMode = "live" | "dry_run" | "disabled";
 
 export type SecretRef = {
   source: string;
@@ -27,9 +28,6 @@ export type GmailSourceConfig = {
     maxResults: number;
   };
   gmailActions: {
-    enabled: boolean;
-    applyLabels: boolean;
-    archive: boolean;
     hasModifyScope: boolean;
   };
 };
@@ -87,6 +85,29 @@ export type WatchConfig = {
   labelFilterBehavior: "INCLUDE" | "EXCLUDE";
 };
 
+export type ActionModeConfig = {
+  mode: ActionExecutionMode;
+};
+
+export type ActionsConfig = {
+  gmail: {
+    label: ActionModeConfig;
+    archive: ActionModeConfig;
+    removeLabel: ActionModeConfig;
+    restoreInbox: ActionModeConfig;
+  };
+  slack: {
+    alert: ActionModeConfig;
+  };
+  wake: {
+    agent: ActionModeConfig;
+    aggregate: ActionModeConfig;
+  };
+  local: {
+    log: ActionModeConfig;
+  };
+};
+
 export type PluginConfig = {
   enabled: boolean;
   dryRun: boolean;
@@ -107,6 +128,7 @@ export type PluginConfig = {
   };
   artifacts: ArtifactConfig;
   watch: WatchConfig;
+  actions: ActionsConfig;
 };
 
 export type RoutingPreference = {

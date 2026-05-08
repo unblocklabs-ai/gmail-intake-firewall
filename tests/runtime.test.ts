@@ -45,6 +45,25 @@ const safeSecurity: SecurityClassification = {
   suspiciousSignals: [],
 };
 
+const liveActions = {
+  gmail: {
+    label: { mode: "live" },
+    archive: { mode: "live" },
+    removeLabel: { mode: "live" },
+    restoreInbox: { mode: "live" },
+  },
+  slack: {
+    alert: { mode: "live" },
+  },
+  wake: {
+    agent: { mode: "live" },
+    aggregate: { mode: "live" },
+  },
+  local: {
+    log: { mode: "live" },
+  },
+};
+
 test("polling runtime processes enabled source candidates and persists cursor", async (t) => {
   const stateStore = await tempStore(t);
   const queries: (string | undefined)[] = [];
@@ -533,6 +552,7 @@ test("polling runtime leaves message pending when a required action fails", asyn
   const appliedLabels: string[] = [];
   const config = resolvePluginConfig({
     dryRun: false,
+    actions: liveActions,
     sqlitePath: stateStore.path,
     security: {
       archiveOnQuarantine: false,
@@ -590,6 +610,7 @@ test("polling runtime stores append-only action attempts across retries", async 
   const stateStore = await tempStore(t);
   const config = resolvePluginConfig({
     dryRun: false,
+    actions: liveActions,
     sqlitePath: stateStore.path,
     security: {
       alertTarget: "slack:#security",
@@ -640,6 +661,7 @@ test("polling runtime marks processed only after required actions succeed", asyn
   const stateStore = await tempStore(t);
   const config = resolvePluginConfig({
     dryRun: false,
+    actions: liveActions,
     sqlitePath: stateStore.path,
     sources: [{ id: "primary", accountEmail: "user@example.com" }],
     tags: [{ id: "client-dev", description: "Client dev", wakeMode: "wake_now", wakeTarget: "agent:dev" }],
@@ -828,6 +850,7 @@ test("runtime keeps Gmail notification history cursor on processing errors", asy
   stateStore.setSourceCursor("primary", { mode: "watch", historyId: "100", watchExpiresAt: "2026-05-07T12:00:00.000Z" });
   const config = resolvePluginConfig({
     dryRun: false,
+    actions: liveActions,
     sqlitePath: stateStore.path,
     sources: [{
       id: "primary",
@@ -1655,6 +1678,7 @@ test("aggregate drain delivers due digest and marks rows delivered", async (t) =
   const wakes: string[] = [];
   const runtime = new GmailIntakePollingRuntime(resolvePluginConfig({
     dryRun: false,
+    actions: liveActions,
     sqlitePath: stateStore.path,
     wakeTargets: [{ id: "agent:digest", agentId: "digest-agent" }],
   }), {
@@ -1697,6 +1721,7 @@ test("aggregate daily cadence uses configured timezone calendar boundary", async
   const wakes: string[] = [];
   const runtime = new GmailIntakePollingRuntime(resolvePluginConfig({
     dryRun: false,
+    actions: liveActions,
     sqlitePath: stateStore.path,
     wakeTargets: [{ id: "agent:digest", agentId: "digest-agent" }],
     aggregate: { timezone: "America/New_York" },
@@ -1768,6 +1793,56 @@ test("aggregate dry-run leaves due rows queued", async (t) => {
   assert.deepEqual(stateStore.listAggregateQueue().map((item) => item.messageId), ["msg-1"]);
 });
 
+test("aggregate disabled mode skips due rows without marking delivered", async (t) => {
+  const stateStore = await tempStore(t);
+  stateStore.enqueueAggregate({
+    sourceId: "primary",
+    accountEmail: "user@example.com",
+    messageId: "msg-1",
+    threadId: "thread-msg-1",
+    tags: ["digest"],
+    sanitizedSummary: "Digest item",
+    queuedAt: "2026-05-05T00:00:00.000Z",
+    wakeTarget: "agent:digest",
+    cadence: "daily",
+  });
+  let wakeCount = 0;
+  const runtime = new GmailIntakePollingRuntime(resolvePluginConfig({
+    dryRun: false,
+    actions: {
+      ...liveActions,
+      wake: {
+        ...liveActions.wake,
+        aggregate: { mode: "disabled" },
+      },
+    },
+    sqlitePath: stateStore.path,
+    wakeTargets: [{ id: "agent:digest", agentId: "digest-agent" }],
+  }), {
+    stateStore,
+    gmailClientFactory: () => ({
+      async listCandidates() { return []; },
+      async fetchMessage() { return message("msg-1"); },
+      async applyLabel() {},
+      async archive() {},
+    }),
+    actionDeps: {
+      wake: {
+        async startDetachedAgentTurn() {
+          wakeCount += 1;
+        },
+      },
+    },
+  });
+
+  const summary = await runtime.drainAggregates(new Date("2026-05-06T12:00:00.000Z"));
+
+  assert.equal(summary.processed, 0);
+  assert.equal(summary.skipped, 1);
+  assert.equal(wakeCount, 0);
+  assert.deepEqual(stateStore.listAggregateQueue().map((item) => item.messageId), ["msg-1"]);
+});
+
 test("aggregate drain keeps rows queued when wake target is missing", async (t) => {
   const stateStore = await tempStore(t);
   stateStore.enqueueAggregate({
@@ -1783,6 +1858,7 @@ test("aggregate drain keeps rows queued when wake target is missing", async (t) 
   });
   const runtime = new GmailIntakePollingRuntime(resolvePluginConfig({
     dryRun: false,
+    actions: liveActions,
     sqlitePath: stateStore.path,
   }), {
     stateStore,

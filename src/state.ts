@@ -164,7 +164,7 @@ export function openSqliteStateStore(path: string): SqliteStateStore {
         status.action.type,
         status.required ? 1 : 0,
         status.status,
-        status.error ?? null,
+        status.error ?? status.reason ?? null,
         attemptedAt,
       );
       db.prepare(
@@ -184,7 +184,7 @@ export function openSqliteStateStore(path: string): SqliteStateStore {
         status.action.type,
         status.required ? 1 : 0,
         status.status,
-        status.error ?? null,
+        status.error ?? status.reason ?? null,
         attemptedAt,
       );
     },

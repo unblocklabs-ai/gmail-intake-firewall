@@ -17,9 +17,6 @@ function source(authRef: Record<string, unknown>): GmailSourceConfig {
       maxResults: 1,
     },
     gmailActions: {
-      enabled: true,
-      applyLabels: true,
-      archive: true,
       hasModifyScope: true,
     },
   };
@@ -76,4 +73,3 @@ test("Gmail auth resolves JSON file SecretRef without a host resolver", async ()
   assert.equal(material.accessToken, "access-token");
   assert.deepEqual(material.scopes, ["https://www.googleapis.com/auth/gmail.readonly"]);
 });
-

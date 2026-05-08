@@ -45,9 +45,6 @@ function config(overrides: Partial<PluginConfig> = {}): PluginConfig {
           id: "primary",
           accountEmail: "user@example.com",
           gmailActions: {
-            enabled: true,
-            applyLabels: true,
-            archive: true,
             hasModifyScope: true,
           },
         },
@@ -450,7 +447,11 @@ test("dry-run executor performs no Gmail Slack or wake side effects", async () =
         },
       },
     ],
-    true,
+    {
+      dryRun: true,
+      actions: config().actions,
+      source: config().sources[0],
+    },
     {
       gmail: {
         applyLabel: async () => { calls.push("label"); },
@@ -465,6 +466,168 @@ test("dry-run executor performs no Gmail Slack or wake side effects", async () =
     },
   );
   assert.deepEqual(calls, []);
+});
+
+test("action modes gate live execution independently of global dryRun", async () => {
+  const calls: string[] = [];
+  const baseConfig = config({ dryRun: false });
+  const results = await executePlannedActions(
+    [
+      { type: "gmail_label", label: "OpenClaw/Test", messageId: "msg-1" },
+      { type: "gmail_archive", messageId: "msg-1" },
+      { type: "local_log", summary: "local" },
+    ],
+    {
+      dryRun: false,
+      actions: {
+        ...baseConfig.actions,
+        gmail: {
+          ...baseConfig.actions.gmail,
+          label: { mode: "live" },
+          archive: { mode: "disabled" },
+        },
+        local: {
+          log: { mode: "live" },
+        },
+      },
+      source: baseConfig.sources[0],
+    },
+    {
+      gmail: {
+        applyLabel: async () => { calls.push("label"); },
+        archive: async () => { calls.push("archive"); },
+      },
+      localLog: {
+        write: async () => { calls.push("local"); },
+      },
+    },
+  );
+
+  assert.deepEqual(calls, ["label", "local"]);
+  assert.deepEqual(results.map((result) => result.status), ["succeeded", "disabled", "succeeded"]);
+});
+
+test("global dryRun overrides live action modes", async () => {
+  const calls: string[] = [];
+  const baseConfig = config({ dryRun: true });
+  const results = await executePlannedActions(
+    [
+      { type: "gmail_label", label: "OpenClaw/Test", messageId: "msg-1" },
+      { type: "human_alert", sink: "slack", target: "slack:#security", summary: "alert" },
+      { type: "local_log", summary: "local" },
+      {
+        type: "agent_wake",
+        payload: {
+          sourceId: "primary",
+          accountEmail: "user@example.com",
+          messageId: "msg-1",
+          threadId: "thread-1",
+          tags: [],
+          sanitizedSummary: "summary",
+          security: {
+            verdict: "safe",
+            riskScore: 0,
+            categories: [],
+            reasons: [],
+            safeSummary: "safe",
+            suspiciousSignals: [],
+          },
+        },
+      },
+    ],
+    {
+      dryRun: true,
+      actions: {
+        gmail: {
+          label: { mode: "live" },
+          archive: { mode: "live" },
+          removeLabel: { mode: "live" },
+          restoreInbox: { mode: "live" },
+        },
+        slack: { alert: { mode: "live" } },
+        wake: {
+          agent: { mode: "live" },
+          aggregate: { mode: "live" },
+        },
+        local: { log: { mode: "live" } },
+      },
+      source: baseConfig.sources[0],
+    },
+    {
+      gmail: {
+        applyLabel: async () => { calls.push("label"); },
+        archive: async () => { calls.push("archive"); },
+      },
+      slack: {
+        postAlert: async () => { calls.push("slack"); },
+      },
+      localLog: {
+        write: async () => { calls.push("local"); },
+      },
+      wake: {
+        startDetachedAgentTurn: async () => { calls.push("wake"); },
+      },
+    },
+  );
+
+  assert.deepEqual(calls, []);
+  assert.deepEqual(results.map((result) => result.status), [
+    "skipped_dry_run",
+    "skipped_dry_run",
+    "skipped_dry_run",
+    "skipped_dry_run",
+  ]);
+});
+
+test("live local log fails when executor is missing", async () => {
+  const baseConfig = config({ dryRun: false });
+  const results = await executePlannedActions(
+    [{ type: "local_log", summary: "local" }],
+    {
+      dryRun: false,
+      actions: {
+        ...baseConfig.actions,
+        local: { log: { mode: "live" } },
+      },
+      source: baseConfig.sources[0],
+    },
+    {},
+  );
+
+  assert.equal(results[0]?.status, "failed");
+  assert.match(results[0]?.error ?? "", /Local log executor is not configured/);
+});
+
+test("record-only and aggregate enqueue are not gated by local log mode", async () => {
+  const baseConfig = config({ dryRun: false });
+  const results = await executePlannedActions(
+    [
+      { type: "record_only", reason: "safe_message_no_wake" },
+      {
+        type: "aggregate_enqueue",
+        item: {
+          sourceId: "primary",
+          accountEmail: "user@example.com",
+          messageId: "msg-1",
+          threadId: "thread-1",
+          tags: ["newsletter"],
+          sanitizedSummary: "summary",
+          queuedAt: "2026-05-06T12:00:00.000Z",
+        },
+      },
+    ],
+    {
+      dryRun: false,
+      actions: {
+        ...baseConfig.actions,
+        local: { log: { mode: "disabled" } },
+      },
+      source: baseConfig.sources[0],
+    },
+    {},
+  );
+
+  assert.deepEqual(results.map((result) => result.status), ["succeeded", "succeeded"]);
 });
 
 test("multiple sources do not leak idempotency state", async () => {
@@ -493,14 +656,14 @@ test("multiple sources do not leak idempotency state", async () => {
         accountEmail: "user@example.com",
         enabled: true,
         polling: { intervalMs: 60000, maxResults: 25 },
-        gmailActions: { enabled: true, applyLabels: true, archive: true, hasModifyScope: true },
+        gmailActions: { hasModifyScope: true },
       },
       {
         id: "secondary",
         accountEmail: "other@example.com",
         enabled: true,
         polling: { intervalMs: 60000, maxResults: 25 },
-        gmailActions: { enabled: true, applyLabels: true, archive: true, hasModifyScope: true },
+        gmailActions: { hasModifyScope: true },
       },
     ],
   });
@@ -545,7 +708,7 @@ test("disabled plugin source and unknown source are skipped", async () => {
             accountEmail: "user@example.com",
             enabled: false,
             polling: { intervalMs: 60000, maxResults: 25 },
-            gmailActions: { enabled: true, applyLabels: true, archive: true, hasModifyScope: true },
+            gmailActions: { hasModifyScope: true },
           },
         ],
       }),
@@ -633,9 +796,6 @@ test("read-only Gmail scope degrades to alert and log without label/archive", as
         enabled: true,
         polling: { intervalMs: 60000, maxResults: 25 },
         gmailActions: {
-          enabled: true,
-          applyLabels: true,
-          archive: true,
           hasModifyScope: false,
         },
       },

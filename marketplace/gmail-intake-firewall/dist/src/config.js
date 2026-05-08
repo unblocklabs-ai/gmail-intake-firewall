@@ -7,6 +7,24 @@ const DEFAULT_SECURITY = {
     includeSnippetInAlerts: false,
     archiveOnQuarantine: false,
 };
+const DEFAULT_ACTIONS = {
+    gmail: {
+        label: { mode: "dry_run" },
+        archive: { mode: "disabled" },
+        removeLabel: { mode: "dry_run" },
+        restoreInbox: { mode: "disabled" },
+    },
+    slack: {
+        alert: { mode: "dry_run" },
+    },
+    wake: {
+        agent: { mode: "dry_run" },
+        aggregate: { mode: "dry_run" },
+    },
+    local: {
+        log: { mode: "live" },
+    },
+};
 const DEFAULT_CONFIG = {
     enabled: true,
     dryRun: true,
@@ -42,6 +60,7 @@ const DEFAULT_CONFIG = {
         labelIds: ["INBOX"],
         labelFilterBehavior: "INCLUDE",
     },
+    actions: DEFAULT_ACTIONS,
 };
 function asRecord(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -70,6 +89,9 @@ function wakeModeValue(value) {
 function intakeModeValue(value) {
     return value === "watch" || value === "history" || value === "poll" ? value : "poll";
 }
+function actionExecutionMode(value, fallback) {
+    return value === "live" || value === "dry_run" || value === "disabled" ? value : fallback;
+}
 function assignOptional(target, key, value) {
     if (value !== undefined) {
         target[key] = value;
@@ -96,9 +118,6 @@ function normalizeSources(value) {
                 maxResults: positiveInteger(asRecord(raw.polling).maxResults, 25),
             },
             gmailActions: {
-                enabled: booleanValue(asRecord(raw.gmailActions).enabled, true),
-                applyLabels: booleanValue(asRecord(raw.gmailActions).applyLabels, true),
-                archive: booleanValue(asRecord(raw.gmailActions).archive, true),
                 hasModifyScope: booleanValue(asRecord(raw.gmailActions).hasModifyScope, true),
             },
         };
@@ -237,6 +256,7 @@ export function resolvePluginConfig(rawConfig) {
         },
         artifacts: normalizeArtifacts(artifactsRaw),
         watch: normalizeWatch(watchRaw),
+        actions: normalizeActions(asRecord(raw.actions)),
     };
 }
 function normalizeArtifacts(raw) {
@@ -257,6 +277,33 @@ function normalizeWatch(raw) {
         labelIds: normalizeStringArray(raw.labelIds, DEFAULT_CONFIG.watch.labelIds),
         labelFilterBehavior,
     };
+}
+function normalizeActions(raw) {
+    const gmail = asRecord(raw.gmail);
+    const slack = asRecord(raw.slack);
+    const wake = asRecord(raw.wake);
+    const local = asRecord(raw.local);
+    return {
+        gmail: {
+            label: normalizeActionMode(asRecord(gmail.label), DEFAULT_ACTIONS.gmail.label.mode),
+            archive: normalizeActionMode(asRecord(gmail.archive), DEFAULT_ACTIONS.gmail.archive.mode),
+            removeLabel: normalizeActionMode(asRecord(gmail.removeLabel), DEFAULT_ACTIONS.gmail.removeLabel.mode),
+            restoreInbox: normalizeActionMode(asRecord(gmail.restoreInbox), DEFAULT_ACTIONS.gmail.restoreInbox.mode),
+        },
+        slack: {
+            alert: normalizeActionMode(asRecord(slack.alert), DEFAULT_ACTIONS.slack.alert.mode),
+        },
+        wake: {
+            agent: normalizeActionMode(asRecord(wake.agent), DEFAULT_ACTIONS.wake.agent.mode),
+            aggregate: normalizeActionMode(asRecord(wake.aggregate), DEFAULT_ACTIONS.wake.aggregate.mode),
+        },
+        local: {
+            log: normalizeActionMode(asRecord(local.log), DEFAULT_ACTIONS.local.log.mode),
+        },
+    };
+}
+function normalizeActionMode(raw, fallback) {
+    return { mode: actionExecutionMode(raw.mode, fallback) };
 }
 export function validatePluginConfig(config) {
     const findings = [];
@@ -316,11 +363,11 @@ export function validatePluginConfig(config) {
                 message: "watch intakeMode should configure webhookSecret before exposing the Pub/Sub HTTP route.",
             });
         }
-        if (source.gmailActions.enabled && (source.gmailActions.applyLabels || source.gmailActions.archive) && !source.gmailActions.hasModifyScope) {
+        if (gmailWriteModeConfiguredLive(config) && !source.gmailActions.hasModifyScope) {
             findings.push({
                 severity: "warning",
                 path: `sources.${source.id}.gmailActions.hasModifyScope`,
-                message: "Gmail write actions are configured but hasModifyScope is false; label/archive actions will degrade to log/alert only.",
+                message: "One or more Gmail action modes are live, but hasModifyScope is false; Gmail mutations will be skipped for this source.",
             });
         }
     }
@@ -383,6 +430,12 @@ export function validatePluginConfig(config) {
         });
     }
     return findings;
+}
+function gmailWriteModeConfiguredLive(config) {
+    return config.actions.gmail.label.mode === "live"
+        || config.actions.gmail.archive.mode === "live"
+        || config.actions.gmail.removeLabel.mode === "live"
+        || config.actions.gmail.restoreInbox.mode === "live";
 }
 function addDuplicateFindings(findings, path, values) {
     const seen = new Set();

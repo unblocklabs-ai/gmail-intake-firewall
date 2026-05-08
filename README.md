@@ -60,7 +60,8 @@ V1 is intentionally boring and reliable:
 - Attachments are represented as metadata only in v1.
 - Every processed message gets a durable SQLite decision log entry.
 - Idempotency key is `sourceId + Gmail messageId`.
-- `dryRun` records intended actions without executing Gmail, Slack, or wake side effects.
+- `dryRun` records intended actions without executing Gmail, Slack, local log, or wake side effects. When `dryRun` is `true`, it overrides every `actions.*.mode`.
+- `actions` is the single production rollout gate for side effects. Each action family supports `live`, `dry_run`, or `disabled`.
 
 ## Development
 
@@ -75,14 +76,14 @@ Phase 3 adds the service surfaces needed to run the plugin in a real install wit
 
 Recommended dry-run rollout:
 
-1. Configure one source with `authRef` or `credentialRef`, `dryRun: true`, a local SQLite path, and conservative Gmail actions.
+1. Configure one source with `authRef` or `credentialRef`, `dryRun: true`, a local SQLite path, and conservative `actions` modes.
 2. Configure `openaiApiKeyRef` for `OPENAI_API_KEY`, or use the fallback `OPENAI_API_KEY` config field for local testing.
 3. Add one Slack alert sink, one quarantine label, one wake target, a `webhookSecret`, and a small tag policy.
 4. Start the service and call `validateConfig()` and `status()`.
 5. Run bounded `backfill({ sourceId, query, maxResults, dryRun: true })`.
 6. Use `inspectMessage({ sourceId, messageId })` to review events, decisions, and action attempts.
 7. Use `gmail_intake_firewall_review` for text-based quarantine review when an agent needs to list quarantined items, present safe metadata to a human, record feedback, wake a target, or add sender preferences.
-8. Enable selected Gmail/Slack/wake actions only after dry-run decisions look correct.
+8. Enable selected Gmail/Slack/wake actions by moving individual `actions.*.mode` values to `live` only after dry-run decisions look correct.
 
 Current gateway-compatible secret refs are inline credential objects, env refs, and file refs. For Gmail OAuth, the recommended v1 shape is an env or file ref whose value is JSON:
 
@@ -119,7 +120,7 @@ Review tool:
 - `gmail_intake_firewall_review` is the write-capable text review tool. Supported operations: `listQuarantine`, `getQuarantineItem`, `reviewSummary`, `recordFeedback`, `markHarmful`, `releaseFromQuarantine`, `replayWithFeedback`, `wakeNow`, `muteSender`, `unmuteSender`, `alwaysAggregate`, `removeAlwaysAggregate`, `muteDomain`, `unmuteDomain`, `alwaysAggregateDomain`, `removeAlwaysAggregateDomain`, and `listPreferences`.
 - Review payloads are safe by default: metadata, auth headers, link domains, attachment metadata, risk reasons, sanitized summary, action history, and feedback history. They do not include full raw body, raw HTML, or attachment contents.
 - `muteSender`, `alwaysAggregate`, and their domain variants create preferences that affect future safe routing only. They do not override the security classifier or release risky mail from quarantine. Use `unmuteSender`, `removeAlwaysAggregate`, and the matching domain removals to clear active preferences.
-- `releaseFromQuarantine` can remove the configured quarantine label and optionally restore `INBOX` after a human marks an item safe. Gmail mutation still requires source Gmail actions to be enabled and `hasModifyScope: true`; dry-run returns the intended Gmail actions without applying them.
+- `releaseFromQuarantine` can remove the configured quarantine label and optionally restore `INBOX` after a human marks an item safe. Gmail mutation still requires `hasModifyScope: true`; `dryRun` and `actions.gmail.removeLabel` / `actions.gmail.restoreInbox` decide whether the planned Gmail actions execute live.
 - `replayWithFeedback` records the human decision and replays the latest stored intake event with `force: true` by default, so a reviewed-safe message can run through security/router policy again and produce the normal label/aggregate/wake behavior.
 - `wakeNow` creates a sanitized detached wake from the reviewed decision. It requires an explicit `wakeTarget` for reviewed quarantines and does not include raw suspicious body or attachments.
 - Artifact analysis is local and non-fetching by default. Link metadata includes structural risk hints without requesting URLs, and attachment metadata includes filename/MIME/extension risk hints without downloading or opening attachment bytes. Keep `artifacts.fetchLinks` and `artifacts.downloadAttachments` false in this version.
@@ -206,6 +207,24 @@ Example policy skeleton:
   "openaiApiKeyRef": { "source": "env", "provider": "env", "id": "OPENAI_API_KEY" },
   "openai_model": "gpt-5.5",
   "sqlitePath": "~/.openclaw/gmail-intake-firewall/state.sqlite",
+  "actions": {
+    "gmail": {
+      "label": { "mode": "dry_run" },
+      "archive": { "mode": "disabled" },
+      "removeLabel": { "mode": "dry_run" },
+      "restoreInbox": { "mode": "disabled" }
+    },
+    "slack": {
+      "alert": { "mode": "dry_run" }
+    },
+    "wake": {
+      "agent": { "mode": "dry_run" },
+      "aggregate": { "mode": "dry_run" }
+    },
+    "local": {
+      "log": { "mode": "live" }
+    }
+  },
   "sources": [
     {
       "id": "primary",
@@ -216,9 +235,6 @@ Example policy skeleton:
       "intakeMode": "poll",
       "polling": { "intervalMs": 60000, "maxResults": 25 },
       "gmailActions": {
-        "enabled": true,
-        "applyLabels": true,
-        "archive": true,
         "hasModifyScope": true
       }
     }

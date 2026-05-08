@@ -533,6 +533,7 @@ function buildGmailIntakeFirewallService(
           started: false,
           enabled: config.enabled,
           dryRun: config.dryRun,
+          actions: buildEffectiveActions(config),
           configuredSources: config.sources.length,
           httpRoute: pubSubHttpRouteStatus(config),
           validation: validatePluginConfig(config),
@@ -544,6 +545,7 @@ function buildGmailIntakeFirewallService(
         service: "gmail-intake-firewall-service",
         started: true,
         runtimeReadiness,
+        actions: buildEffectiveActions(config),
         httpRoute: pubSubHttpRouteStatus(config),
         ...runtime.status(),
       };
@@ -568,6 +570,7 @@ function buildGmailIntakeFirewallService(
         summary: {
           enabled: config.enabled,
           dryRun: config.dryRun,
+          actions: buildEffectiveActions(config),
           started: status.started === true,
           configuredSources: config.sources.length,
           errorCount: findings.filter((finding) => finding.severity === "error").length,
@@ -576,6 +579,7 @@ function buildGmailIntakeFirewallService(
         findings,
         validation,
         auth: redactSupportStatus(auth),
+        actions: buildEffectiveActions(config),
       };
     },
     async supportBundle() {
@@ -590,6 +594,7 @@ function buildGmailIntakeFirewallService(
         validation: redactSupportStatus(validation),
         runtimeReadiness: redactSupportStatus(runtimeReadiness),
         auth: redactSupportStatus(auth),
+        actions: redactSupportStatus(buildEffectiveActions(config)),
         status: redactSupportStatus(status),
         review: redactSupportStatus(review),
         notes: [
@@ -903,7 +908,7 @@ async function checkSourceAuthMaterial(
     const hasClientId = Boolean(material.clientId);
     const hasClientSecret = Boolean(material.clientSecret);
     const credentialShapeOk = hasAccessToken || (hasRefreshToken && hasClientId && hasClientSecret);
-    const configuredModifyScope = source.gmailActions.enabled && source.gmailActions.hasModifyScope;
+    const configuredModifyScope = source.gmailActions.hasModifyScope;
     const credentialModifyScope = gmailScopesAllowModify(material.scopes);
     const canModifyGmail = configuredModifyScope && credentialModifyScope !== false;
     if (material.tokenType === "workspace_domain_wide_delegation") {
@@ -1194,6 +1199,34 @@ function buildDoctorFindings(
     }
   }
   return dedupeFindings(findings);
+}
+
+function buildEffectiveActions(config: ReturnType<typeof resolvePluginConfig>): Record<string, unknown> {
+  return {
+    dryRunOverride: config.dryRun,
+    gmail: {
+      label: effectiveMode(config.actions.gmail.label.mode, config.dryRun),
+      archive: effectiveMode(config.actions.gmail.archive.mode, config.dryRun),
+      removeLabel: effectiveMode(config.actions.gmail.removeLabel.mode, config.dryRun),
+      restoreInbox: effectiveMode(config.actions.gmail.restoreInbox.mode, config.dryRun),
+    },
+    slack: {
+      alert: effectiveMode(config.actions.slack.alert.mode, config.dryRun),
+    },
+    wake: {
+      agent: effectiveMode(config.actions.wake.agent.mode, config.dryRun),
+      aggregate: effectiveMode(config.actions.wake.aggregate.mode, config.dryRun),
+    },
+    local: {
+      log: effectiveMode(config.actions.local.log.mode, config.dryRun),
+    },
+  };
+}
+
+function effectiveMode(configured: string, dryRun: boolean): Record<string, unknown> {
+  return dryRun
+    ? { configured, effective: "dry_run", reason: "dryRun is enabled" }
+    : { configured, effective: configured };
 }
 
 function redactSupportStatus(value: unknown): unknown {
