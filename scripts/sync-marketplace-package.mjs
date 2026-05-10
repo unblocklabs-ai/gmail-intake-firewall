@@ -56,7 +56,7 @@ function buildMarketplacePackageJson() {
       output[field] = packageJson[field];
     }
   }
-  output.files = ["dist", "README.md", "openclaw.plugin.json"];
+  output.files = ["dist", "docs", "README.md", "openclaw.plugin.json"];
   return output;
 }
 
@@ -70,6 +70,7 @@ function syncInto(targetDir) {
   writeJson(path.join(targetDir, "package.json"), buildMarketplacePackageJson());
   fs.copyFileSync(path.join(ROOT, "README.md"), path.join(targetDir, "README.md"));
   fs.copyFileSync(path.join(ROOT, "openclaw.plugin.json"), path.join(targetDir, "openclaw.plugin.json"));
+  fs.cpSync(path.join(ROOT, "docs"), path.join(targetDir, "docs"), { recursive: true });
   fs.cpSync(DIST_DIR, path.join(targetDir, "dist"), { recursive: true });
 }
 

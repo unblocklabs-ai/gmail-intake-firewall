@@ -553,11 +553,19 @@ test("plugin doctor and support bundle expose redacted operator diagnostics", as
   await service.stop();
 
   assert.equal(doctor.ok, true);
+  const doctorRollout = doctor.rollout as { verdict?: string; productionChecklist?: unknown[]; suggestedOperations?: string[]; summary?: { warningCount?: number }; findings?: unknown[] };
+  assert.equal(doctorRollout.verdict, "caution");
+  assert.ok(Array.isArray(doctorRollout.productionChecklist));
+  assert.ok(doctorRollout.suggestedOperations?.includes("setupWatch:primary"));
+  const doctorSummary = doctor.summary as { warningCount?: number } | undefined;
+  assert.equal(doctorSummary?.warningCount, doctorRollout.summary?.warningCount);
+  assert.deepEqual(doctor.findings, doctorRollout.findings);
+  assert.ok(Array.isArray(doctor.legacyFindings));
   assert.equal(toolDoctor?.service, "gmail-intake-firewall-service");
   const findingMessages = JSON.stringify(doctor.findings);
   assert.match(findingMessages, /dryRun is enabled/);
   assert.match(findingMessages, /run setupWatch/);
-  assert.match(findingMessages, /resolved OAuth scopes do not allow Gmail modify/);
+  assert.match(JSON.stringify(doctor.legacyFindings), /resolved OAuth scopes do not allow Gmail modify/);
   const serializedBundle = JSON.stringify(supportBundle);
   assert.match(serializedBundle, /Support bundle is redacted/);
   const supportAuth = supportBundle.auth as { sources?: Array<Record<string, unknown>> };
@@ -565,6 +573,8 @@ test("plugin doctor and support bundle expose redacted operator diagnostics", as
   assert.equal(supportAuthSource?.hasAccessToken, false);
   assert.equal(supportAuthSource?.hasRefreshToken, true);
   assert.equal(supportAuthSource?.hasClientSecret, true);
+  assert.match(serializedBundle, /"rollout"/);
+  assert.match(serializedBundle, /"productionChecklist"/);
   assert.doesNotMatch(serializedBundle, /refresh-token/);
   assert.doesNotMatch(serializedBundle, /client-secret/);
   assert.doesNotMatch(serializedBundle, /test-key/);

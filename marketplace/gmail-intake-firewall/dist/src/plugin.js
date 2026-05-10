@@ -7,6 +7,7 @@ import { createHostActionDeps } from "./hostActions.js";
 import { createOpenAiRouterClassifier } from "./openaiRouterClassifier.js";
 import { createOpenAiSecurityClassifier, resolveOpenAiApiKey } from "./openaiSecurityClassifier.js";
 import { createNoopRouterClassifier } from "./routerClassifier.js";
+import { buildEffectiveActions, buildRolloutReadiness } from "./rollout.js";
 import { GmailIntakePollingRuntime } from "./runtime.js";
 import { createUnavailableSecurityClassifier } from "./securityClassifier.js";
 import { openSqliteStateStore } from "./state.js";
@@ -471,21 +472,25 @@ function buildGmailIntakeFirewallService(config, host, logger) {
             const validation = validatePluginConfig(config);
             const status = await this.status();
             const auth = await this.checkSourceAuth({});
-            const findings = buildDoctorFindings(config, validation, status, auth);
+            const legacyFindings = buildDoctorFindings(config, validation, status, auth);
+            const rollout = buildRolloutReadiness({ config, validation, status, auth });
             return {
-                ok: !findings.some((finding) => finding.severity === "error"),
+                ok: rollout.verdict !== "blocked",
                 service: "gmail-intake-firewall-service",
                 generatedAt: new Date().toISOString(),
                 summary: {
                     enabled: config.enabled,
                     dryRun: config.dryRun,
                     actions: buildEffectiveActions(config),
+                    rolloutVerdict: rollout.verdict,
                     started: status.started === true,
                     configuredSources: config.sources.length,
-                    errorCount: findings.filter((finding) => finding.severity === "error").length,
-                    warningCount: findings.filter((finding) => finding.severity === "warning").length,
+                    errorCount: rollout.summary.errorCount,
+                    warningCount: rollout.summary.warningCount,
                 },
-                findings,
+                findings: rollout.findings,
+                rollout,
+                legacyFindings,
                 validation,
                 auth: redactSupportStatus(auth),
                 actions: buildEffectiveActions(config),
@@ -496,6 +501,7 @@ function buildGmailIntakeFirewallService(config, host, logger) {
             const status = await this.status();
             const auth = await this.checkSourceAuth({});
             const review = runtime?.reviewSummary();
+            const rollout = buildRolloutReadiness({ config, validation, status, auth });
             return {
                 ok: true,
                 service: "gmail-intake-firewall-service",
@@ -504,6 +510,7 @@ function buildGmailIntakeFirewallService(config, host, logger) {
                 runtimeReadiness: redactSupportStatus(runtimeReadiness),
                 auth: redactSupportStatus(auth),
                 actions: redactSupportStatus(buildEffectiveActions(config)),
+                rollout: redactSupportStatus(rollout),
                 status: redactSupportStatus(status),
                 review: redactSupportStatus(review),
                 notes: [
@@ -1073,32 +1080,6 @@ function buildDoctorFindings(config, validation, status, auth) {
         }
     }
     return dedupeFindings(findings);
-}
-function buildEffectiveActions(config) {
-    return {
-        dryRunOverride: config.dryRun,
-        gmail: {
-            label: effectiveMode(config.actions.gmail.label.mode, config.dryRun),
-            archive: effectiveMode(config.actions.gmail.archive.mode, config.dryRun),
-            removeLabel: effectiveMode(config.actions.gmail.removeLabel.mode, config.dryRun),
-            restoreInbox: effectiveMode(config.actions.gmail.restoreInbox.mode, config.dryRun),
-        },
-        slack: {
-            alert: effectiveMode(config.actions.slack.alert.mode, config.dryRun),
-        },
-        wake: {
-            agent: effectiveMode(config.actions.wake.agent.mode, config.dryRun),
-            aggregate: effectiveMode(config.actions.wake.aggregate.mode, config.dryRun),
-        },
-        local: {
-            log: effectiveMode(config.actions.local.log.mode, config.dryRun),
-        },
-    };
-}
-function effectiveMode(configured, dryRun) {
-    return dryRun
-        ? { configured, effective: "dry_run", reason: "dryRun is enabled" }
-        : { configured, effective: configured };
 }
 function redactSupportStatus(value) {
     if (Array.isArray(value)) {

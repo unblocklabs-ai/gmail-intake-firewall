@@ -70,6 +70,13 @@ npm install
 npm run preflight
 ```
 
+## Operator Docs
+
+- [Production rollout](docs/production-rollout.md): rollout gates, action-mode order, doctor/support bundle expectations, and success criteria before live side effects.
+- [Gmail Pub/Sub watch setup](docs/pubsub-watch.md): Google Cloud topic/subscription setup, watch config, setup/renew/repair runbook, and route troubleshooting.
+- [Watch validation plan](docs/watch-validation-plan.md): the real-gateway regression matrix for proving event-driven intake before production rollout.
+- [V1 decisions](docs/v1-decisions.md): implementation decisions captured during the build.
+
 ## Operator Workflow
 
 Phase 3 adds the service surfaces needed to run the plugin in a real install without reading SQLite by hand first.
@@ -80,10 +87,11 @@ Recommended dry-run rollout:
 2. Configure `openaiApiKeyRef` for `OPENAI_API_KEY`, or use the fallback `OPENAI_API_KEY` config field for local testing.
 3. Add one Slack alert sink, one quarantine label, one wake target, a `webhookSecret`, and a small tag policy.
 4. Start the service and call `validateConfig()` and `status()`.
-5. Run bounded `backfill({ sourceId, query, maxResults, dryRun: true })`.
-6. Use `inspectMessage({ sourceId, messageId })` to review events, decisions, and action attempts.
-7. Use `gmail_intake_firewall_review` for text-based quarantine review when an agent needs to list quarantined items, present safe metadata to a human, record feedback, wake a target, or add sender preferences.
-8. Enable selected Gmail/Slack/wake actions by moving individual `actions.*.mode` values to `live` only after dry-run decisions look correct.
+5. Call `doctor()` and check `rollout.verdict`, `rollout.productionChecklist`, and `rollout.suggestedOperations`.
+6. Run bounded `backfill({ sourceId, query, maxResults, dryRun: true })`.
+7. Use `inspectMessage({ sourceId, messageId })` to review events, decisions, and action attempts.
+8. Use `gmail_intake_firewall_review` for text-based quarantine review when an agent needs to list quarantined items, present safe metadata to a human, record feedback, wake a target, or add sender preferences.
+9. Enable selected Gmail/Slack/wake actions by moving individual `actions.*.mode` values to `live` only after dry-run decisions look correct. Use [Production rollout](docs/production-rollout.md) as the live-action checklist.
 
 Current gateway-compatible secret refs are inline credential objects, env refs, and file refs. For Gmail OAuth, the recommended v1 shape is an env or file ref whose value is JSON:
 
@@ -128,52 +136,7 @@ Review tool:
 
 ## Gmail Watch / PubSub Production Setup
 
-Use watch mode when the OpenClaw gateway can receive Google Pub/Sub push requests. Polling and history repair remain enabled because Gmail notifications can be delayed or dropped.
-
-Google Cloud setup:
-
-1. Enable Gmail API and Pub/Sub API in the same Google Cloud project used by the OAuth client.
-2. Create a Pub/Sub topic, for example `projects/my-project/topics/gmail-intake`.
-3. Grant Gmail publish permission on that topic per the Gmail push notification docs. The topic project id must match the developer project used by the watch request.
-4. Create a push subscription targeting the OpenClaw gateway route: `https://<gateway-host>/gmail-intake-firewall/pubsub`.
-5. Configure the subscription to pass the plugin `webhookSecret` as either `Authorization: Bearer <secret>`, `x-openclaw-token`, or a `token` query parameter. Shared-secret auth is the v1 production path; Pub/Sub OIDC verification is planned later.
-
-Plugin config shape:
-
-```json
-{
-  "webhookSecret": "use-an-openclaw-secret-or-private-config-value",
-  "watch": {
-    "autoSetup": true,
-    "renewBeforeMs": 86400000,
-    "repairOnNoNotificationMs": 21600000,
-    "labelIds": ["INBOX"],
-    "labelFilterBehavior": "INCLUDE"
-  },
-  "sources": [
-    {
-      "id": "primary",
-      "accountEmail": "user@example.com",
-      "intakeMode": "watch",
-      "watchTopicName": "projects/my-project/topics/gmail-intake",
-      "historyLookback": "2d",
-      "authRef": { "source": "env", "provider": "env", "id": "GMAIL_PRIMARY_OAUTH_JSON" }
-    }
-  ]
-}
-```
-
-Operator runbook:
-
-1. Start with `dryRun: true`.
-2. Call `gmail_intake_firewall_status` with `operation: "validateConfig"` and fix all errors.
-3. Call `gmail_intake_firewall_status` with `operation: "checkSourceAuth"` for the watch source.
-4. Call `gmail_intake_firewall_status` with `operation: "setupWatch", sourceId: "primary"`.
-5. Confirm `status().sources[].readiness.historyCursorPresent` and `watchActive` are true.
-6. Send a test email. The first Gmail watch notification may only establish the cursor; subsequent notifications should drain Gmail history and process messages.
-7. Watch `lastNotificationAt`, `lastHistoryAt`, `lastWatchRenewalAt`, `watchNeedsRenewal`, and `missedNotificationRepairDue` in status.
-8. If notifications appear missed, call `gmail_intake_firewall_status` with `operation: "repairWatch", sourceId: "primary", force: true`.
-9. If watch expiration is near or status reports `watchNeedsRenewal`, call `operation: "renewWatch", sourceId: "primary", force: true`.
+Use watch mode when the OpenClaw gateway can receive Google Pub/Sub push requests. Polling and history repair remain enabled because Gmail notifications can be delayed or dropped. The focused setup/runbook lives in [docs/pubsub-watch.md](docs/pubsub-watch.md), and the real-gateway validation matrix lives in [docs/watch-validation-plan.md](docs/watch-validation-plan.md).
 
 Agent-facing quarantine review prompt:
 
