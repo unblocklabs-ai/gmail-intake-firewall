@@ -60,12 +60,12 @@
   "devDependencies": {
     "@openclaw/plugin-inspector": "^0.3.10",
     "@types/node": "^24.6.0",
-    "openclaw": "2026.5.3",
+    "openclaw": "2026.10.5",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.5.3"
+    "openclaw": ">=2026.6.6"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -96,5 +96,11 @@
       "publishToClawHub": false,
       "publishToNpm": true
     }
+  },
+  "overrides": {
+    "follow-redirects": "^1.16.1",
+    "hono": "^4.13.11",
+    "markdown-it": "^14.3.3",
+    "@modelcontextprotocol/sdk": "^1.32.0"
   }
 }
